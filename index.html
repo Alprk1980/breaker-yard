@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Breaker-Yard</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #070a12; overflow: hidden; }
+      canvas { display: block; width: 100vw; height: 100vh; cursor: crosshair; }
+      #hud {
+        position: fixed; top: 8px; right: 8px; padding: 8px 10px;
+        font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+        color: #cbd5e1; background: rgba(7, 10, 18, 0.78);
+        border: 1px solid #1e293b; border-radius: 6px; white-space: pre; pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="viewport"></canvas>
+    <div id="hud"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
