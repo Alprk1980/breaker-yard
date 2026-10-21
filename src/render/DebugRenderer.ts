@@ -1,5 +1,8 @@
 import { INJECT_PRESSURE_BAR } from '../sim/constants';
-import { TileFlags } from '../sim/TileFlags';
+import { MAX_PATH, PAWN_STATE_NAMES, PAWN_WARNING_BITS, PawnState, PawnWarning } from '../sim/PawnManager';
+import type { Simulation } from '../sim/Simulation';
+import { TileFlags, isLoadBearing, isSolid } from '../sim/TileFlags';
+import { PRIORITY_DEFAULT, ToolKind } from '../sim/WorkOrderQueue';
 import type { World } from '../sim/World';
 import { RAMP_MAX_BAR, RAMP_SIZE, buildGasRamp, buildStressPalette, packRGBA } from './colorRamp';
 
@@ -19,6 +22,21 @@ const COLOR_ANCHOR = '#38bdf8';
 const COLOR_FLOATING_TILE = 'rgba(148, 163, 184, 0.35)';
 const COLOR_HOVER = 'rgba(255, 255, 255, 0.85)';
 
+const COLOR_ORDER = 'rgba(251, 146, 60, 0.9)';
+const COLOR_ORDER_CLAIMED = 'rgba(250, 204, 21, 0.95)';
+const COLOR_ORDER_SUSPENDED = 'rgba(239, 68, 68, 0.95)';
+const COLOR_ORDER_PROGRESS = 'rgba(250, 204, 21, 0.55)';
+const COLOR_PATH = 'rgba(56, 189, 248, 0.9)';
+const COLOR_SELECTED = '#ffffff';
+const COLOR_PAWN_TEXT = '#e2e8f0';
+const COLOR_PAWN_WARNING = '#f87171';
+const COLOR_HEADING = '#0f172a';
+const PAWN_FONT = '11px ui-monospace, SFMono-Regular, Menlo, monospace';
+/** Fill per PawnState. */
+const PAWN_COLORS: readonly string[] = ['#94a3b8', '#38bdf8', '#facc15', '#fb923c', '#f43f5e'];
+/** Zoom (pixels per tile) at which every pawn gets a status label, not just the selected one. */
+const LABEL_ZOOM = 10;
+
 const TILE_VOID = packRGBA(0, 0, 0, 0);
 const TILE_FLOOR = packRGBA(36, 42, 56, 255);
 const TILE_BULKHEAD = packRGBA(100, 110, 128, 255);
@@ -30,18 +48,36 @@ const Tool = {
   CUT: 1,
   INJECT: 2,
   PAN: 3,
+  DESIGNATE: 4,
+  UNDESIGNATE: 5,
 } as const;
 
+/** Label per warning bitmask, built once so drawing a label never builds a string. */
+function buildWarningLabels(): string[] {
+  const names = ['PRESSURE', 'VENT', 'TOXIC', 'STRESS', 'ADRIFT'];
+  const bits = [PawnWarning.PRESSURE, PawnWarning.VENT, PawnWarning.TOXIC, PawnWarning.STRESS, PawnWarning.ADRIFT];
+  const out: string[] = [];
+  for (let mask = 0; mask < 1 << PAWN_WARNING_BITS; mask++) {
+    const parts: string[] = [];
+    for (let b = 0; b < bits.length; b++) if ((mask & bits[b]) !== 0) parts.push(names[b]);
+    out.push(parts.length > 0 ? `! ${parts.join(' ')}` : '');
+  }
+  return out;
+}
+
 /**
- * Canvas 2D debug view: tiles, gas pressure ramp, and the stress lattice, with a
- * pan/zoom camera and mouse tools. All buffers, colour tables and event handlers
- * are created in the constructor; `render()` only writes into them.
+ * Canvas 2D debug view: tiles, gas pressure ramp, the stress lattice, work orders and
+ * pawns, with a pan/zoom camera and mouse tools. All buffers, colour tables, labels and
+ * event handlers are created in the constructor; `render()` only writes into them.
  *
  * Controls:
- *   Left click / drag     cut tile
+ *   Left click            select the pawn under the cursor; elsewhere, cut tile (drag to keep cutting)
+ *   Shift + left click    designate a wall for deconstruction (drag for more; again to cancel)
  *   Right click / hold    inject 10 bar gas
  *   Middle click          toggle dock anchor on a girder
- *   Shift or Space + drag pan; WASD / arrows pan; wheel zooms at cursor
+ *   P                     spawn a pawn at the cursor
+ *   Esc                   deselect
+ *   Space + drag pan; WASD / arrows pan; wheel zooms at cursor
  *   G / T                 toggle gas / stress layers
  */
 export class DebugRenderer {
@@ -59,6 +95,14 @@ export class DebugRenderer {
 
   hoverX = -1;
   hoverY = -1;
+  /** Cursor position in fractional tile units, for picking pawns. */
+  private hoverFx = -1;
+  private hoverFy = -1;
+  /** Pawn whose route is drawn, or -1. */
+  selectedPawn = -1;
+
+  private readonly world: World;
+  private readonly warningLabels = buildWarningLabels();
 
   private readonly ctx: CanvasRenderingContext2D;
   private readonly tileCanvas: HTMLCanvasElement;
@@ -87,8 +131,10 @@ export class DebugRenderer {
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
-    private readonly world: World,
+    private readonly sim: Simulation,
   ) {
+    const world = sim.world;
+    this.world = world;
     const ctx = canvas.getContext('2d');
     if (!ctx) throw new Error('Canvas 2D context unavailable');
     this.ctx = ctx;
@@ -173,6 +219,150 @@ export class DebugRenderer {
       ctx.lineWidth = 0.15;
       ctx.strokeRect(this.hoverX, this.hoverY, 1, 1);
     }
+
+    // Orders, routes and pawns are drawn in device pixels, rounded to integers so canvas
+    // arguments stay small integers rather than boxed doubles.
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    this.drawOrders();
+    if (this.selectedPawn >= 0) this.drawRoute(this.selectedPawn);
+    this.drawPawns();
+  }
+
+  private drawOrders(): void {
+    const ctx = this.ctx;
+    const q = this.sim.orders;
+    const w = this.world.width;
+    const z = this.zoom;
+    const ox = this.originX();
+    const oy = this.originY();
+    const inset = z > 6 ? 1 : 0;
+    ctx.lineWidth = z > 8 ? 2 : 1;
+    for (let s = 0; s < q.capacity; s++) {
+      const idx = q.cell[s];
+      if (idx < 0) continue;
+      const sx = ox + (idx % w) * z;
+      const sy = oy + ((idx / w) | 0) * z;
+      ctx.strokeStyle =
+        q.suspended[s] > 0 ? COLOR_ORDER_SUSPENDED : q.claimedBy[s] >= 0 ? COLOR_ORDER_CLAIMED : COLOR_ORDER;
+      ctx.strokeRect(sx + inset, sy + inset, z - inset * 2, z - inset * 2);
+      const filled = ((q.progress[s] * z) / 100) | 0;
+      if (filled > 0) {
+        ctx.fillStyle = COLOR_ORDER_PROGRESS;
+        ctx.fillRect(sx, sy + z - filled, z, filled);
+      }
+    }
+  }
+
+  /** Route from the pawn through its remaining waypoints to the target tile. */
+  private drawRoute(p: number): void {
+    const P = this.sim.pawns;
+    if (P.alive[p] === 0) {
+      this.selectedPawn = -1;
+      return;
+    }
+    const ctx = this.ctx;
+    const w = this.world.width;
+    const z = this.zoom;
+    const ox = this.originX();
+    const oy = this.originY();
+    const half = z >> 1;
+    ctx.strokeStyle = COLOR_PATH;
+    ctx.lineWidth = z > 8 ? 2 : 1;
+    ctx.beginPath();
+    ctx.moveTo((ox + P.pos[p * 2] * z) | 0, (oy + P.pos[p * 2 + 1] * z) | 0);
+    const base = p * MAX_PATH;
+    for (let k = P.pathStep[p]; k < P.pathLen[p]; k++) {
+      const n = P.path[base + k];
+      ctx.lineTo(ox + (n % w) * z + half, oy + ((n / w) | 0) * z + half);
+    }
+    ctx.stroke();
+    const tx = P.target[p * 2];
+    if (tx >= 0 && P.state[p] !== PawnState.IDLE) {
+      ctx.strokeRect(ox + tx * z, oy + P.target[p * 2 + 1] * z, z, z);
+    }
+  }
+
+  private drawPawns(): void {
+    const ctx = this.ctx;
+    const P = this.sim.pawns;
+    const z = this.zoom;
+    const ox = this.originX();
+    const oy = this.originY();
+    const r = z > 8 ? ((z * 0.45) | 0) : 4;
+    const nose = r * 2;
+    ctx.font = PAWN_FONT;
+    ctx.textBaseline = 'middle';
+    for (let p = 0; p < P.capacity; p++) {
+      if (P.alive[p] === 0) continue;
+      const sx = (ox + P.pos[p * 2] * z) | 0;
+      const sy = (oy + P.pos[p * 2 + 1] * z) | 0;
+      const state = P.state[p];
+
+      // Body: a diamond, filled when the magboots are locked to the floor, hollow when adrift.
+      ctx.beginPath();
+      ctx.moveTo(sx, sy - r);
+      ctx.lineTo(sx + r, sy);
+      ctx.lineTo(sx, sy + r);
+      ctx.lineTo(sx - r, sy);
+      ctx.closePath();
+      if (P.magBoot[p] === 1) {
+        ctx.fillStyle = PAWN_COLORS[state];
+        ctx.fill();
+      } else {
+        ctx.strokeStyle = PAWN_COLORS[state];
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+
+      // Heading indicator.
+      ctx.strokeStyle = P.magBoot[p] === 1 ? COLOR_HEADING : PAWN_COLORS[state];
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(sx, sy);
+      ctx.lineTo((sx + P.heading[p * 2] * nose) | 0, (sy + P.heading[p * 2 + 1] * nose) | 0);
+      ctx.stroke();
+
+      const selected = p === this.selectedPawn;
+      if (selected) {
+        ctx.strokeStyle = COLOR_SELECTED;
+        ctx.lineWidth = 1;
+        ctx.strokeRect(sx - r - 3, sy - r - 3, r * 2 + 6, r * 2 + 6);
+      }
+
+      // Status: state, cut progress, and any safety warnings.
+      if (selected || z >= LABEL_ZOOM) {
+        const lx = sx + r + 4;
+        ctx.fillStyle = COLOR_PAWN_TEXT;
+        ctx.fillText(PAWN_STATE_NAMES[state], lx, sy - 6);
+        if (state === PawnState.DISASSEMBLING || state === PawnState.PRE_CUT) {
+          const bar = ((P.progress[p] * 40) / 100) | 0;
+          ctx.fillRect(lx, sy + 1, bar, 3);
+        }
+        const warn = P.warnings[p];
+        if (warn !== 0) {
+          ctx.fillStyle = COLOR_PAWN_WARNING;
+          ctx.fillText(this.warningLabels[warn], lx, sy + 10);
+        }
+      }
+    }
+  }
+
+  /** Shift-click: designates a wall, or cancels an existing order. Returns the mode for dragging. */
+  private designateAtHover(mode: number): number {
+    const x = this.hoverX;
+    const y = this.hoverY;
+    if (x < 0) return mode;
+    const q = this.sim.orders;
+    if (mode === Tool.NONE) mode = q.hasOrder(x, y) ? Tool.UNDESIGNATE : Tool.DESIGNATE;
+    if (mode === Tool.UNDESIGNATE) {
+      q.cancelOrder(x, y);
+    } else {
+      const flags = this.world.getTile(x, y);
+      if (isSolid(flags)) {
+        q.addOrder(x, y, PRIORITY_DEFAULT, isLoadBearing(flags) ? ToolKind.HEAVY_CUTTER : ToolKind.CUTTER);
+      }
+    }
+    return mode;
   }
 
   private paintTiles(): void {
@@ -305,8 +495,12 @@ export class DebugRenderer {
     const rect = this.canvas.getBoundingClientRect();
     const sx = (clientX - rect.left) * this.dpr;
     const sy = (clientY - rect.top) * this.dpr;
-    const tx = Math.floor((sx - this.originX()) / this.zoom);
-    const ty = Math.floor((sy - this.originY()) / this.zoom);
+    const fx = (sx - this.originX()) / this.zoom;
+    const fy = (sy - this.originY()) / this.zoom;
+    const tx = Math.floor(fx);
+    const ty = Math.floor(fy);
+    this.hoverFx = fx;
+    this.hoverFy = fy;
     if (this.world.inBounds(tx, ty)) {
       this.hoverX = tx;
       this.hoverY = ty;
@@ -334,11 +528,17 @@ export class DebugRenderer {
       this.lastPointerX = e.clientX;
       this.lastPointerY = e.clientY;
       this.screenToTile(e.clientX, e.clientY);
-      if (e.button === 0 && (e.shiftKey || this.panKeyHeld)) {
+      if (e.button === 0 && this.panKeyHeld) {
         this.tool = Tool.PAN;
+      } else if (e.button === 0 && e.shiftKey) {
+        this.tool = this.designateAtHover(Tool.NONE);
       } else if (e.button === 0) {
-        this.tool = Tool.CUT;
-        if (this.hoverX >= 0) this.world.cutTile(this.hoverX, this.hoverY);
+        const picked = this.sim.pawns.pawnNear(this.hoverFx, this.hoverFy, 0.75);
+        this.selectedPawn = picked;
+        if (picked < 0) {
+          this.tool = Tool.CUT;
+          if (this.hoverX >= 0) this.world.cutTile(this.hoverX, this.hoverY);
+        }
       } else if (e.button === 2) {
         this.tool = Tool.INJECT;
         this.applyHeldTools();
@@ -358,8 +558,11 @@ export class DebugRenderer {
       const prevX = this.hoverX;
       const prevY = this.hoverY;
       this.screenToTile(e.clientX, e.clientY);
-      if (this.tool === Tool.CUT && this.hoverX >= 0 && (this.hoverX !== prevX || this.hoverY !== prevY)) {
+      const moved = this.hoverX >= 0 && (this.hoverX !== prevX || this.hoverY !== prevY);
+      if (this.tool === Tool.CUT && moved) {
         this.world.cutTile(this.hoverX, this.hoverY);
+      } else if ((this.tool === Tool.DESIGNATE || this.tool === Tool.UNDESIGNATE) && moved) {
+        this.designateAtHover(this.tool);
       }
     });
 
@@ -433,6 +636,15 @@ export class DebugRenderer {
         break;
       case 'KeyF':
         if (down) this.resetCamera();
+        break;
+      case 'KeyP':
+        if (down && !e.repeat && this.hoverX >= 0) {
+          const p = this.sim.pawns.spawn(this.hoverX, this.hoverY);
+          if (p >= 0) this.selectedPawn = p;
+        }
+        break;
+      case 'Escape':
+        if (down) this.selectedPawn = -1;
         break;
     }
   }
