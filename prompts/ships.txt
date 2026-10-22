@@ -1,0 +1,82 @@
+You are designing derelict ships for Breaker-Yard, a 2D top-down orbital ship-breaking simulation (Hardspace:
+Shipbreaker crossed with RimWorld). Each ship hangs off a docking gantry by two arms on its LEFT side. A crew of up
+to three walks its decks with cutting torches; the player cuts the ship into pieces and grapples them into three
+salvage bins (furnace, processor, barge). Each ship comes with a salvage contract: deliver a credit quota before
+the clock runs out.
+
+Write {{count}} NEW ships as a JSON array. Already shipped (do not reuse these ids or copy these designs): {{existing}}.
+Make every ship a different kind of vessel with its own layout, e.g. an ore hauler, a fuel tanker, a survey
+cutter, a passenger shuttle, a mining tender, a patrol corvette, a cargo lighter, a medical frigate.
+
+COORDINATES. Each ship is a grid of width x height tiles. (0, 0) is the top-left tile; x grows right, y grows down.
+The outer ring of tiles (x = 0, x = width-1, y = 0, y = height-1) is the load-bearing frame, built automatically.
+Everything inside it starts as walkable deck. Lines are [x1, y1, x2, y2], inclusive, and must be horizontal or
+vertical. Rects are [x, y, w, h].
+
+FIELDS
+- id: kebab-case, at most 32 chars. name: 3-32 chars. description: 20-160 chars, one in-world sentence.
+- width: 16-38. height: 12-40.
+- arms: the two rows (1 to height-2) on the left frame where the gantry arms hold the ship, at least 4 apart.
+- bulkheads: interior walls, lines strictly inside the frame (x 1..width-2, y 1..height-2). They split the deck
+  into compartments.
+- doors: [x, y] tiles ON a bulkhead that become openings, so the crew can walk between compartments.
+- girders: interior load-bearing walls, lines strictly inside the frame. They block movement like bulkheads (doors
+  cannot go through them) but carry load to the arms. Use them to stiffen long or heavy ships. May be [].
+- engine: one line ON the frame ring, NOT on the left side (x = 0 is docked). 3-16 tiles. Very heavy and valuable.
+- consoles: solid electronics rects strictly inside the frame, 2-20 tiles in total. Valuable.
+- atmosphere: [x, y, bar] on any deck tile sets the pressure of everything connected to it through doors (0-6
+  bar), so give pressure pockets their own sealed room. Everything not listed holds 1 bar. Over 1.5 bar is an overpressure hazard (crews refuse to cut walls holding
+  back more than 2 bar); under 0.2 bar is a vacuum pocket.
+- leaks: up to 3 [x, y] deck tiles that seep toxic gas.
+- crew: 1-3 [x, y] deck tiles, all in the same compartment, where the crew starts.
+- contract: {"client": 3-30 chars, "brief": 20-200 chars, one or two sentences telling the crew what matters,
+  "quota": whole credits, "timeLimit": 240-900 seconds}.
+
+RULES (an automatic check builds every ship in the simulator and rejects anything that breaks them)
+- 2-12 rooms, each at least 4 deck tiles. A room is a deck area bounded by walls, with doors counted as walls, so
+  bulkheads with doors in them divide rooms. Doors must sit on bulkhead tiles (not girders, consoles or deck).
+  Air flows through doors: a room with no door is a sealed compartment, the only way to hold a different pressure.
+- From the first crew tile the crew must be able to walk (through doors) to at least 50% of all deck tiles, and to
+  a deck tile next to every console and next to the engine.
+- 1-4 hazards in total: compartments over 1.5 bar, compartments under 0.2 bar, and leaks. At most 2 overpressure.
+- The frame must hold the ship's own weight: the ship is a cantilever off its left arms, so a long ship with a heavy
+  engine far from the arms overloads the frame. Peak member load must stay under 85% of breaking. Spread the arms
+  apart, keep long ships' engines shorter, or add interior girders running from the left frame toward the engine.
+- Value: each tile is worth credits when delivered to the right bin: deck 4, bulkhead 6, frame or girder 10,
+  engine 100, console 80. The whole ship must be worth 2500-15000 credits, and no single bin may hold over 75% of it
+  (deck goes to the furnace; bulkheads and girders to the processor; engine and consoles to the barge).
+- contract.quota must be 25%-60% of the ship's total value.
+
+HOW TO WORK. Do not verify the rules by hand: the check computes the exact value, frame load and crew reach and
+reports the numbers when something fails, and you will get the chance to fix exactly what it names. Design the
+ship, estimate its value roughly (deck tiles x 4 is most of it, plus 100 per engine tile and 80 per console tile,
+plus about 10 per frame tile), set the quota near 40% of that estimate, and answer. Keep your thinking short.
+
+SIZE. Prefer mid-size and large hulls (width 26-38, height 18-36): small hulls are already in the fleet.
+
+EXAMPLE (a valid ship; do not copy it):
+{
+  "id": "demo-hull",
+  "name": "Demo Hull",
+  "description": "The yard's training hull: one pressurised room behind a sealed airlock, engine block bolted to the stern.",
+  "width": 37,
+  "height": 29,
+  "arms": [4, 24],
+  "bulkheads": [[7, 1, 7, 27]],
+  "girders": [],
+  "doors": [],
+  "engine": [36, 8, 36, 20],
+  "consoles": [[22, 1, 6, 1]],
+  "atmosphere": [],
+  "leaks": [[20, 20]],
+  "crew": [[14, 10], [18, 16], [22, 22]],
+  "contract": {
+    "client": "Yard Training Office",
+    "brief": "Strip the training hull. Engine to the barge, plating to the furnace.",
+    "quota": 3000,
+    "timeLimit": 600
+  }
+}
+
+Answer with only the JSON array of {{count}} ships.
+{{ask}}

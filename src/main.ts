@@ -1,12 +1,15 @@
+import shipData from './data/ships.json';
 import { DebugRenderer } from './render/DebugRenderer';
 import { FixedTimestep } from './sim/FixedTimestep';
 import { TICK_HZ } from './sim/constants';
+import { Contract, ContractState } from './sim/Contract';
 import { B_MASS, BODY_STRIDE } from './sim/DebrisField';
 import { DemoDirector } from './sim/DemoDirector';
 import { HAZARD_NAMES } from './sim/HazardLog';
 import { BIN_NAMES, MATERIAL_BIN, MATERIAL_COUNT, MATERIAL_NAMES } from './sim/materials';
 import { PAWN_STATE_NAMES } from './sim/PawnManager';
 import { DEMO, buildDemoHull, seedDemoCrew, warmUpCrew, warmUpKernels } from './sim/scenes';
+import { type ShipBlueprint, buildShip, seedShipCrew } from './sim/ships';
 import { Simulation } from './sim/Simulation';
 import { World } from './sim/World';
 
@@ -18,8 +21,13 @@ warmUpKernels(new World());
 warmUpCrew(new Simulation(), 1, 200);
 const sim = new Simulation();
 const world = sim.world;
-// Attract mode: the game plays a salvage run on its own until the player takes over.
-const demo = new DemoDirector(sim);
+// Salvage contracts, one per generated ship, taken in turn with N.
+const fleet = shipData as ShipBlueprint[];
+const contract = new Contract();
+let shipIndex = -1;
+// Attract mode: the game plays a salvage run on its own until the player takes over, then
+// docks the next contract ship to show what is on offer.
+const demo = new DemoDirector(sim, fleet);
 demo.restart();
 const renderer = new DebugRenderer(canvas, sim);
 renderer.demo = demo;
@@ -30,6 +38,15 @@ canvas.addEventListener('pointerdown', () => demo.stop(), { capture: true });
 // headroom above the furnace for the HUD panel.
 renderer.focus(DEMO.gantry.x - 1, DEMO.zones[0].y0 - 30, DEMO.zones[2].x1, DEMO.zones[2].y1, 2);
 const clock = new FixedTimestep();
+
+function takeContract(i: number): void {
+  demo.stop();
+  shipIndex = i;
+  buildShip(world, fleet[i]);
+  sim.resetCrew();
+  seedShipCrew(sim, fleet[i]);
+  contract.start(fleet[i]);
+}
 
 let paused = false;
 // Doubles kept in a typed array: writing a double to a module-level `let` boxes it every frame.
@@ -48,6 +65,7 @@ function frame(now: number): void {
       const t0 = performance.now();
       sim.tick();
       timing[LAST_TICK_MS] = performance.now() - t0;
+      contract.tick(world);
     }
   }
   renderer.render(now);
@@ -59,15 +77,28 @@ window.addEventListener('keydown', (e) => {
   if (e.code === 'Enter') paused = !paused;
   else if (e.code === 'KeyM' && !e.repeat) {
     if (demo.active) demo.stop();
-    else demo.restart();
+    else {
+      contract.reset();
+      shipIndex = -1;
+      demo.restart();
+    }
+  } else if (e.code === 'KeyN' && !e.repeat && fleet.length > 0) {
+    // Take the ship the demo is showing, call an open contract done, or move on to the next ship.
+    if (demo.showcaseIndex >= 0) takeContract(demo.showcaseIndex);
+    else if (contract.state === ContractState.ACTIVE) contract.close(world);
+    else takeContract((shipIndex + 1) % fleet.length);
   } else if (e.code === 'KeyR') {
-    demo.stop();
-    buildDemoHull(world);
-    sim.resetCrew();
-    seedDemoCrew(sim);
+    if (shipIndex >= 0) takeContract(shipIndex);
+    else {
+      demo.stop();
+      buildDemoHull(world);
+      sim.resetCrew();
+      seedDemoCrew(sim);
+    }
   } else if (e.code === 'Period' && paused) {
     demo.tick();
     sim.tick();
+    contract.tick(world);
   }
 });
 
@@ -102,8 +133,25 @@ setInterval(() => {
   const salvage =
     `\ncredits ${S.credits.toFixed(0)}  delivered ${S.deliveredTiles} tiles (${S.missortedTiles} missorted, -${S.missortLoss.toFixed(0)})` +
     `  torched -${S.destroyedValue.toFixed(0)}\ndebris ${D.count} bodies / ${D.tilesUsed} tiles`;
+  // Contract status: the banner while it runs, the brief in the HUD.
+  let job = '';
+  const mmss = (s: number): string => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  if (contract.state === ContractState.ACTIVE) {
+    renderer.bannerTitle = `CONTRACT ${shipIndex + 1}/${fleet.length}  ${contract.shipName}  for ${contract.client}`;
+    renderer.bannerSub = `${S.credits.toFixed(0)} / ${contract.quota} cr   ${mmss(contract.secondsLeft)} left   N: call it done   R: restart`;
+    job = `\ncontract: ${contract.brief}`;
+  } else if (contract.state !== ContractState.NONE) {
+    const met = contract.state === ContractState.PASSED;
+    renderer.bannerTitle =
+      `${met ? 'CONTRACT MET' : 'CONTRACT FAILED'}  ${contract.shipName}: ` +
+      `${contract.finalCredits.toFixed(0)} / ${contract.quota} cr   grade ${contract.grade}`;
+    renderer.bannerSub = 'N: next ship   R: try again   M: demo';
+  } else {
+    renderer.bannerTitle = fleet.length > 0 ? 'Sandbox' : '';
+    renderer.bannerSub = `N: take a salvage contract (${fleet.length} ships)   M: demo`;
+  }
   const P = sim.pawns;
-  let crew = `\ncrew ${P.count}  orders ${sim.orders.count}`;
+  let crew = `${job}\ncrew ${P.count}  orders ${sim.orders.count}`;
   const sel = renderer.selectedPawn;
   if (sel >= 0 && P.alive[sel]) {
     crew +=
@@ -125,5 +173,5 @@ setInterval(() => {
     crew +
     `\n\nLMB select pawn / grapple debris (drag to tow) / cut   Shift+LMB designate wall   RMB inject 10 bar   MMB anchor\n` +
     `P spawn pawn   Esc deselect   Space+drag or WASD pan   wheel zoom   F fit\n` +
-    `G gas   T stress   Enter pause   . step   R reset   M demo ${demo.active ? 'on' : 'off'}`;
+    `G gas   T stress   Enter pause   . step   R reset   M demo ${demo.active ? 'on' : 'off'}   N contract`;
 }, 250);

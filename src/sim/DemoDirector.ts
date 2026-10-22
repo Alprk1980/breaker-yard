@@ -1,11 +1,12 @@
 import { B_X, B_Y, BODY_STRIDE, MAX_BODIES } from './DebrisField';
 import { DEMO, buildDemoHull, seedDemoCrew } from './scenes';
+import { type ShipBlueprint, buildShip, seedShipCrew } from './ships';
 import type { Simulation } from './Simulation';
 import { ToolKind } from './WorkOrderQueue';
 
 /** One beat of the demo. `tick` returns true when the beat is over. */
 interface Beat {
-  readonly label: string;
+  label: string;
   start(): void;
   tick(): boolean;
 }
@@ -35,6 +36,7 @@ function centre(zone: { x0: number; y0: number; x1: number; y1: number }): [numb
  *      The engine is towed to the barge.
  *   3. A deck section is cut loose through the hole and towed to the furnace.
  *   4. The gantry arms are cut, and the hull tears away with the crew aboard.
+ *   5. The next ship from the generated fleet docks, with its contract on the banner.
  *
  * Beats are built once, so `tick()` does not allocate.
  */
@@ -47,11 +49,16 @@ export class DemoDirector {
   loops = 0;
   /** Credits earned by the last finished run. */
   lastRunCredits = 0;
+  /** Fleet index of the ship docked in the closing beat, or -1. `N` takes its contract. */
+  showcaseIndex = -1;
 
   private readonly beats: Beat[];
   private beat = 0;
 
-  constructor(private readonly sim: Simulation) {
+  constructor(
+    private readonly sim: Simulation,
+    private readonly fleet: readonly ShipBlueprint[] = [],
+  ) {
     const [bargeX, bargeY] = centre(zones[2]);
     const [furnaceX, furnaceY] = centre(zones[0]);
     const engineCuts: number[] = [];
@@ -79,7 +86,7 @@ export class DemoDirector {
       this.torch('4/4  Cutting the gantry arms', [gantry.x + 3, armRows[0], gantry.x + 3, armRows[1]]),
       this.wait('4/4  The hull tears free, crew aboard', 40),
       this.haul('4/4  Hauling the stripped hull clear of the gantry', 64, 64, 64, 112, 300),
-      this.wait('Run complete: restarting', 60),
+      this.showcase(160),
     ];
   }
 
@@ -96,6 +103,7 @@ export class DemoDirector {
     seedDemoCrew(sim);
     this.active = true;
     this.beat = 0;
+    this.showcaseIndex = -1;
     this.beats[0].start();
   }
 
@@ -103,6 +111,7 @@ export class DemoDirector {
   stop(): void {
     if (!this.active) return;
     this.active = false;
+    this.showcaseIndex = -1;
     this.sim.world.debris.releaseGrapple();
     this.cursorX = this.cursorY = -1;
   }
@@ -113,7 +122,8 @@ export class DemoDirector {
     this.beat++;
     if (this.beat === this.beats.length) {
       this.loops++;
-      this.lastRunCredits = this.sim.world.salvage.credits;
+      // The showcase rebuilds the world, so with a fleet the run's credits were taken there.
+      if (this.fleet.length === 0) this.lastRunCredits = this.sim.world.salvage.credits;
       this.restart();
       return;
     }
@@ -130,6 +140,34 @@ export class DemoDirector {
       },
       tick: () => ++t >= ticks,
     };
+  }
+
+  /**
+   * Docks the next generated ship (one per loop, in turn) with its crew, and advertises its
+   * contract for `ticks`. Skipped when there is no fleet.
+   */
+  private showcase(ticks: number): Beat {
+    let t = 0;
+    const beat: Beat = {
+      label: '',
+      start: () => {
+        t = 0;
+        this.cursorX = this.cursorY = -1;
+        if (this.fleet.length === 0) return;
+        this.lastRunCredits = this.sim.world.salvage.credits;
+        const i = this.loops % this.fleet.length;
+        const bp = this.fleet[i];
+        const c = bp.contract;
+        this.showcaseIndex = i;
+        buildShip(this.sim.world, bp);
+        this.sim.resetCrew();
+        seedShipCrew(this.sim, bp);
+        const time = `${Math.floor(c.timeLimit / 60)}:${String(c.timeLimit % 60).padStart(2, '0')}`;
+        beat.label = `Up next: ${bp.name} for ${c.client}, ${c.quota} cr in ${time}. Press N to take this contract`;
+      },
+      tick: () => this.fleet.length === 0 || ++t >= ticks,
+    };
+    return beat;
   }
 
   /** Work orders on a wall column; over when the crew has cleared them all, or on timeout. */
