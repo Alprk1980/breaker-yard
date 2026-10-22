@@ -197,7 +197,8 @@ export class PathGrid {
   /**
    * A* from (sx, sy) to (tx, ty). With `adjacent` set, the goal is any passable tile
    * 4-adjacent to the target instead of the target itself, which is how a pawn reaches a
-   * wall it is about to cut. The start tile is allowed to be impassable (a pawn adrift).
+   * wall it is about to cut; with `diagonal` as well, 8-adjacent tiles count too (a torch
+   * reaching across a corner). The start tile is allowed to be impassable (a pawn adrift).
    *
    * Writes tile indices from the first step after the start through the goal into
    * `out[offset .. offset + length)` and returns the length (0 when already at the goal),
@@ -212,6 +213,7 @@ export class PathGrid {
     out: Int32Array,
     offset: number,
     maxLength: number,
+    diagonal = false,
   ): number {
     if (!this.inBounds(sx, sy) || !this.inBounds(tx, ty)) return PATH_NONE;
     const w = this.width;
@@ -236,7 +238,7 @@ export class PathGrid {
     seen[start] = gen;
     g[start] = 0;
     parent[start] = -1;
-    f[start] = this.heuristic(sx, sy, tx, ty, adjacent);
+    f[start] = this.heuristic(sx, sy, tx, ty, adjacent, diagonal);
     this.push(start);
 
     let goal = -1;
@@ -247,7 +249,7 @@ export class PathGrid {
       expanded++;
       const nx = node % w;
       const ny = (node / w) | 0;
-      if (this.isGoal(nx, ny, tx, ty, adjacent) && (node !== start || cost[node] !== COST_IMPASSABLE)) {
+      if (this.isGoal(nx, ny, tx, ty, adjacent, diagonal) && (node !== start || cost[node] !== COST_IMPASSABLE)) {
         goal = node;
         break;
       }
@@ -272,7 +274,7 @@ export class PathGrid {
         if (seen[m] === gen && tentative >= g[m]) continue;
         g[m] = tentative;
         parent[m] = node;
-        f[m] = tentative + this.heuristic(mx, my, tx, ty, adjacent);
+        f[m] = tentative + this.heuristic(mx, my, tx, ty, adjacent, diagonal);
         if (seen[m] !== gen) {
           seen[m] = gen;
           this.push(m);
@@ -292,23 +294,25 @@ export class PathGrid {
     return length;
   }
 
-  private isGoal(x: number, y: number, tx: number, ty: number, adjacent: boolean): boolean {
+  private isGoal(x: number, y: number, tx: number, ty: number, adjacent: boolean, diagonal: boolean): boolean {
     if (!adjacent) return x === tx && y === ty;
     const dx = x > tx ? x - tx : tx - x;
     const dy = y > ty ? y - ty : ty - y;
-    return dx + dy === 1;
+    return diagonal ? dx <= 1 && dy <= 1 && dx + dy > 0 : dx + dy === 1;
   }
 
   /** Octile distance in cost units, less one step when any neighbour of the target will do. */
-  private heuristic(x: number, y: number, tx: number, ty: number, adjacent: boolean): number {
+  private heuristic(x: number, y: number, tx: number, ty: number, adjacent: boolean, diagonal: boolean): number {
     const dx = x > tx ? x - tx : tx - x;
     const dy = y > ty ? y - ty : ty - y;
     const lo = dx < dy ? dx : dy;
     const hi = dx < dy ? dy : dx;
     const h = (hi - lo) * COST_BASE + ((lo * COST_BASE * DIAG_NUM) / DIAG_DEN) | 0;
     if (!adjacent) return h;
-    // Any 4-neighbour of the target is at most one orthogonal step closer than the target.
-    return h > COST_BASE ? h - COST_BASE : 0;
+    // Any 4-neighbour of the target is at most one orthogonal step closer than the target,
+    // and an 8-neighbour at most one diagonal step.
+    const step = diagonal ? ((COST_BASE * DIAG_NUM) / DIAG_DEN) | 0 : COST_BASE;
+    return h > step ? h - step : 0;
   }
 
   private less(a: number, b: number): boolean {

@@ -162,8 +162,10 @@ describe('debris motion', () => {
       w.tick();
       maxX = Math.max(maxX, w.debris.bounds[b * 4 + 2]);
     }
-    // Contacts are sampled at tile centres, so a tile may overlap the wall by up to half a tile.
-    expect(maxX).toBeLessThan(50.5);
+    // Contacts are sampled at tile centres and inset corners, so a tile stops at the wall's
+    // face: at most one tick of travel (0.2 tiles at 4 tiles/s) goes past it before the
+    // contact pushes back, so the centre stays a quarter tile short of x = 50.
+    expect(maxX).toBeLessThan(49.75);
     expect(w.debris.body[o + B_VX]).toBeLessThan(0);
     expect(w.debris.body[o + B_VX]).toBeGreaterThan(-4);
     expect(w.getTile(50, 24)).toBe(BULKHEAD);

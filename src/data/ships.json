@@ -81,7 +81,7 @@
       "client": "Ore Guild",
       "brief": "Cut the ore hauler for parts. Keep the engine block intact for the barge.",
       "quota": 1300,
-      "timeLimit": 600
+      "timeLimit": 310
     }
   },
   {
@@ -162,7 +162,7 @@
       "client": "Fuel Trust",
       "brief": "Strip the tanker's plating and salvage the drive. Watch the toxic vent.",
       "quota": 1300,
-      "timeLimit": 600
+      "timeLimit": 300
     }
   },
   {
@@ -242,7 +242,7 @@
       "client": "Meridian Survey Co",
       "brief": "Recover the survey console and engine; the toxic leak keeps the aft deck unusable.",
       "quota": 1900,
-      "timeLimit": 600
+      "timeLimit": 416
     }
   },
   {
@@ -430,7 +430,7 @@
       "client": "Halden Salvage",
       "brief": "Deliver the engine block intact and strip the plating before the tide clock hits zero.",
       "quota": 1650,
-      "timeLimit": 600
+      "timeLimit": 366
     }
   },
   {
@@ -534,7 +534,7 @@
       "client": "Orbital Salvage Co",
       "brief": "Cut the corvette into sound sections, keep the drive intact for the barge, and clear the toxic leak.",
       "quota": 2000,
-      "timeLimit": 720
+      "timeLimit": 420
     }
   }
 ]

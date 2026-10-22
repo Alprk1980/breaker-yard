@@ -1,5 +1,8 @@
+import { HAUL_LANE_X } from './constants';
 import { B_X, B_Y, BODY_STRIDE, MAX_BODIES } from './DebrisField';
-import { DEMO, buildDemoHull, seedDemoCrew } from './scenes';
+import { MATERIAL_VALUE, Material } from './materials';
+import { PawnState } from './PawnManager';
+import { DEMO, buildDemoHull, seedDemoCrew, setRoomPressure } from './scenes';
 import { type ShipBlueprint, buildShip, seedShipCrew } from './ships';
 import type { Simulation } from './Simulation';
 import { ToolKind } from './WorkOrderQueue';
@@ -16,7 +19,7 @@ const TORCH_INTERVAL = 6;
 /** A tow moves on to its next waypoint once the load's centre is this close, in tiles. */
 const WAYPOINT_RADIUS = 2.5;
 /** Clear lane between the hull's right side and the salvage bins, where tows travel. */
-const LANE_X = 88;
+const LANE_X = HAUL_LANE_X;
 
 const { hull, gantry, engine, armRows, zones } = DEMO;
 const lockX = hull.x0 + 7;
@@ -31,6 +34,11 @@ function centre(zone: { x0: number; y0: number; x1: number; y1: number }): [numb
 export interface DemoSection {
   readonly id: string;
   readonly title: string;
+  /**
+   * In the full run, carry on from the previous section's world instead of running `setup`.
+   * Played on its own, a section always runs its setup.
+   */
+  readonly continues: boolean;
   setup(): void;
   readonly beats: readonly Beat[];
 }
@@ -43,7 +51,9 @@ export interface DemoSection {
  *   2. engine    The torch frees the engine block (hull breach) and it is towed to the barge.
  *   3. deck      A deck section is cut loose through the hole and towed to the furnace.
  *   4. tearoff   The gantry arms are cut; the hull tears away with the crew aboard.
- *   5. contract  The next ship from the generated fleet docks, with its contract on the banner.
+ *   5. haul      On a fresh, vented hull the crew gets a salvage order on the engine block and
+ *                does the rest alone: severs it free, tows it to the barge, flies home.
+ *   6. contract  The next ship from the generated fleet docks, with its contract on the banner.
  *
  * `restart()` plays them all in order and loops. `playSection(i)` loops one section on its
  * own: each section's `setup` builds what it needs from scratch (the deck section starts
@@ -100,6 +110,7 @@ export class DemoDirector {
       {
         id: 'crew',
         title: 'Crew',
+        continues: false,
         setup: fresh,
         beats: [
           this.wait('A derelict hull hangs off the docking gantry', 60),
@@ -109,6 +120,7 @@ export class DemoDirector {
       {
         id: 'engine',
         title: 'Engine',
+        continues: true,
         setup: fresh,
         beats: [
           this.torch('Torch cutting the engine block out of the frame (hull breach!)', engineCuts),
@@ -120,6 +132,7 @@ export class DemoDirector {
       {
         id: 'deck',
         title: 'Deck',
+        continues: true,
         setup: () => {
           fresh();
           this.removeEngine(engineCuts, engineY);
@@ -134,6 +147,7 @@ export class DemoDirector {
       {
         id: 'tearoff',
         title: 'Tear-off',
+        continues: true,
         setup: fresh,
         beats: [
           this.wait('Crew stands down', 40),
@@ -144,8 +158,23 @@ export class DemoDirector {
         ],
       },
       {
+        id: 'haul',
+        title: 'Crew haul',
+        continues: false,
+        setup: () => {
+          fresh();
+          setRoomPressure(this.sim.world, 0);
+          this.sim.designateSalvage(engine.x, engine.y0, engine.x, engine.y1);
+        },
+        beats: [
+          this.untilDebris('Salvage order on the engine block: the crew severs it free, no player input', 20 * 120),
+          this.untilHauled('A hauler climbs aboard, tugs it to the barge and flies home', 13 * MATERIAL_VALUE[Material.ENGINE_PART], 20 * 90),
+        ],
+      },
+      {
         id: 'contract',
         title: 'Contract',
+        continues: true,
         // The showcase docks its own ship.
         setup: () => {},
         beats: [this.showcase(160)],
@@ -172,7 +201,6 @@ export class DemoDirector {
   /** Starts the full demo from the top, on a fresh demo hull. */
   restart(): void {
     this.soloSection = -1;
-    this.sections[0].setup();
     this.begin(this.fullRun, this.fullRunSection);
   }
 
@@ -180,7 +208,6 @@ export class DemoDirector {
   playSection(i: number): void {
     if (i < 0 || i >= this.sections.length) return;
     this.soloSection = i;
-    this.sections[i].setup();
     this.begin(this.sections[i].beats, this.sections[i].beats.map(() => i));
   }
 
@@ -225,8 +252,12 @@ export class DemoDirector {
 
   private startBeat(): void {
     const beat = this.run[this.beat];
-    beat.start();
     const k = this.runSection[this.beat];
+    // A section's first beat sets its world up: always when played alone, and in the full run
+    // unless it carries on from the section before.
+    const first = this.beat === 0 || this.runSection[this.beat - 1] !== k;
+    if (first && (this.soloSection >= 0 || this.beat === 0 || !this.sections[k].continues)) this.sections[k].setup();
+    beat.start();
     this.label = `${k + 1}/${this.sections.length}  ${this.sections[k].title}: ${beat.label}`;
     this.hint = this.soloSection >= 0 ? this.hintSolo[this.soloSection] : this.hintFull;
   }
@@ -288,6 +319,40 @@ export class DemoDirector {
       tick: () => this.fleet.length === 0 || ++t >= ticks,
     };
     return beat;
+  }
+
+  /** Waits, hands off, until something tears loose (or `timeout` ticks pass). */
+  private untilDebris(label: string, timeout: number): Beat {
+    let t = 0;
+    return {
+      label,
+      start: () => {
+        t = 0;
+        this.cursorX = this.cursorY = -1;
+      },
+      tick: () => this.sim.world.debris.count > 0 || ++t >= timeout,
+    };
+  }
+
+  /** Waits, hands off, until `credits` are delivered and no one is still flying home. */
+  private untilHauled(label: string, credits: number, timeout: number): Beat {
+    let t = 0;
+    const sim = this.sim;
+    return {
+      label,
+      start: () => {
+        t = 0;
+        this.cursorX = this.cursorY = -1;
+      },
+      tick: () => {
+        if (++t >= timeout) return true;
+        if (sim.world.salvage.credits < credits) return false;
+        for (let p = 0; p < sim.pawns.capacity; p++) {
+          if (sim.pawns.alive[p] === 1 && sim.pawns.state[p] === PawnState.RETURNING) return false;
+        }
+        return true;
+      },
+    };
   }
 
   /** Work orders on a wall column; over when the crew has cleared them all, or on timeout. */

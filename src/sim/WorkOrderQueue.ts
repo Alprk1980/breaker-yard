@@ -9,6 +9,17 @@ export const ToolKind = {
   HEAVY_CUTTER: 0x02,
 } as const;
 
+/** What an order asks for. */
+export const OrderKind = {
+  /** Cut a wall open: done once the tile is no longer solid. */
+  WALL: 0,
+  /**
+   * Sever: cut the tile away completely (wall to deck, deck to vacuum), so whatever it held
+   * together comes apart. Salvage designations are made of these.
+   */
+  SEVER: 1,
+} as const;
+
 export const MAX_ORDERS = 256;
 export const PRIORITY_MIN = 1;
 export const PRIORITY_MAX = 5;
@@ -29,6 +40,8 @@ export class WorkOrderQueue {
   readonly cell: Int32Array;
   readonly priority: Uint8Array;
   readonly tool: Uint8Array;
+  /** `OrderKind` per slot. */
+  readonly kind: Uint8Array;
   /** Pawn holding the order, or -1. */
   readonly claimedBy: Int8Array;
   /** Disassembly progress, 0..100. */
@@ -45,6 +58,7 @@ export class WorkOrderQueue {
     this.cell = new Int32Array(capacity).fill(-1);
     this.priority = new Uint8Array(capacity);
     this.tool = new Uint8Array(capacity);
+    this.kind = new Uint8Array(capacity);
     this.claimedBy = new Int8Array(capacity).fill(-1);
     this.progress = new Float32Array(capacity);
     this.suspended = new Uint16Array(capacity);
@@ -52,10 +66,16 @@ export class WorkOrderQueue {
   }
 
   /**
-   * Designates the tile at (x, y). Re-designating an existing order updates its priority
-   * and tool. Returns the slot, or -1 when the pool is full or (x, y) is off the grid.
+   * Designates the tile at (x, y). Re-designating an existing order updates its priority,
+   * tool and kind. Returns the slot, or -1 when the pool is full or (x, y) is off the grid.
    */
-  addOrder(x: number, y: number, priority: number = PRIORITY_DEFAULT, tool: number = ToolKind.CUTTER): number {
+  addOrder(
+    x: number,
+    y: number,
+    priority: number = PRIORITY_DEFAULT,
+    tool: number = ToolKind.CUTTER,
+    kind: number = OrderKind.WALL,
+  ): number {
     if (x < 0 || y < 0 || x >= this.width || y * this.width + x >= this.slotAt.length) return -1;
     const idx = y * this.width + x;
     const p = priority < PRIORITY_MIN ? PRIORITY_MIN : priority > PRIORITY_MAX ? PRIORITY_MAX : priority | 0;
@@ -63,6 +83,7 @@ export class WorkOrderQueue {
     if (slot >= 0) {
       this.priority[slot] = p;
       this.tool[slot] = tool;
+      this.kind[slot] = kind;
       return slot;
     }
     slot = this.cell.indexOf(-1);
@@ -70,6 +91,7 @@ export class WorkOrderQueue {
     this.cell[slot] = idx;
     this.priority[slot] = p;
     this.tool[slot] = tool;
+    this.kind[slot] = kind;
     this.claimedBy[slot] = -1;
     this.progress[slot] = 0;
     this.suspended[slot] = 0;

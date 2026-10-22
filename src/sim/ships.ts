@@ -70,6 +70,13 @@ export const SHIP_LIMITS = {
   maxQuotaShare: 0.6,
   minTime: 240,
   maxTime: 900,
+  /**
+   * The clock must suit the job: about `timeBase` seconds plus `timePerDeck` per deck tile,
+   * give or take `timeSlack`, inside minTime-maxTime.
+   */
+  timeBase: 200,
+  timePerDeck: 0.5,
+  timeSlack: 0.3,
   /** Peak member utilisation an intact ship may sit at. */
   maxStress: 0.85,
 } as const;
@@ -446,6 +453,13 @@ export function shipErrors(entry: unknown): string[] {
     if (value.perBin[b] > value.total * L.maxBinShare) {
       err(`the ${BIN_NAMES[b]} takes ${Math.round((100 * value.perBin[b]) / value.total)}% of the ship's value; keep every bin under ${L.maxBinShare * 100}%`);
     }
+  }
+  const est = L.timeBase + deck * L.timePerDeck;
+  const tLo = Math.max(L.minTime, Math.ceil(est * (1 - L.timeSlack)));
+  const tHi = Math.min(L.maxTime, Math.floor(est * (1 + L.timeSlack)));
+  const time = bp.contract.timeLimit;
+  if (time < tLo || time > tHi) {
+    err(`contract.timeLimit ${time} s does not suit a ship with ${deck} deck tiles; set it to ${tLo}-${tHi} seconds`);
   }
   const quota = bp.contract.quota;
   const lo = Math.ceil(value.total * L.minQuotaShare);

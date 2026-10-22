@@ -46,11 +46,13 @@ RULES (an automatic check builds every ship in the simulator and rejects anythin
   engine 100, console 80. The whole ship must be worth 2500-15000 credits, and no single bin may hold over 75% of it
   (deck goes to the furnace; bulkheads and girders to the processor; engine and consoles to the barge).
 - contract.quota must be 25%-60% of the ship's total value.
+- contract.timeLimit must suit the job: about 200 seconds plus 0.5 seconds per deck tile, within 30% either way
+  (and 240-900). A small hull with 200 deck tiles gets about 300 s; a big one with 900 gets about 650 s.
 
 HOW TO WORK. Do not verify the rules by hand: the check computes the exact value, frame load and crew reach and
 reports the numbers when something fails, and you will get the chance to fix exactly what it names. Design the
 ship, estimate its value roughly (deck tiles x 4 is most of it, plus 100 per engine tile and 80 per console tile,
-plus about 10 per frame tile), set the quota near 40% of that estimate, and answer. Keep your thinking short.
+plus about 10 per frame tile), set the quota near 40% of that estimate and the time limit from the deck size, and answer. Keep your thinking short.
 
 SIZE. Prefer mid-size and large hulls (width 26-38, height 18-36): small hulls are already in the fleet.
 

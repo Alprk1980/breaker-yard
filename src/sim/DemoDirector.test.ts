@@ -3,6 +3,7 @@ import { DemoDirector } from './DemoDirector';
 import demoBlueprint from './fixtures/demoBlueprint.json';
 import { HazardKind } from './HazardLog';
 import { MATERIAL_VALUE, Material } from './materials';
+import { PawnState } from './PawnManager';
 import { DEMO } from './scenes';
 import type { ShipBlueprint } from './ships';
 import { Simulation } from './Simulation';
@@ -16,13 +17,15 @@ describe('demo director', () => {
     demo.restart();
     const S = sim.world.salvage;
     let showcased = false;
+    let scriptedCredits = 0;
     const seen = new Set<string>();
     let tore = false;
     let ridden = false;
-    for (let t = 0; t < 20 * 180 && demo.loops === 0; t++) {
+    for (let t = 0; t < 20 * 300 && demo.loops === 0; t++) {
       demo.tick();
       sim.tick();
       seen.add(demo.label);
+      if (demo.label.includes('Tear-off')) scriptedCredits = Math.max(scriptedCredits, S.credits);
       if (demo.label.includes('Up next: Showcased Hull')) showcased ||= demo.showcaseIndex === 0 && sim.pawns.count === 3;
       if (demo.label.includes('tears free')) {
         tore ||= sim.world.debris.tilesUsed > 900;
@@ -32,7 +35,7 @@ describe('demo director', () => {
     expect(demo.loops).toBe(1);
     expect(seen.size).toBeGreaterThanOrEqual(10);
     // The engine went to the barge and the deck to the furnace, both whole and in the right bin.
-    expect(demo.lastRunCredits).toBeGreaterThanOrEqual(13 * MATERIAL_VALUE[Material.ENGINE_PART] + 45 * MATERIAL_VALUE[Material.DECK_PLATE]);
+    expect(scriptedCredits).toBeGreaterThanOrEqual(13 * MATERIAL_VALUE[Material.ENGINE_PART] + 45 * MATERIAL_VALUE[Material.DECK_PLATE]);
     expect(tore).toBe(true);
     expect(ridden).toBe(true);
     // The closing beat docked the fleet's first ship with its crew and advertised its contract.
@@ -68,6 +71,9 @@ describe('demo sections', () => {
     engine: (sim) => sim.world.salvage.credits >= 13 * MATERIAL_VALUE[Material.ENGINE_PART],
     deck: (sim) => sim.world.salvage.credits >= 45 * MATERIAL_VALUE[Material.DECK_PLATE],
     tearoff: (sim) => sim.world.debris.tilesUsed > 900 && sim.hazards.countOf(HazardKind.CARRIED_OFF) === 3,
+    haul: (sim) =>
+      sim.world.salvage.deliveredByMaterial[Material.ENGINE_PART] === 13 &&
+      [0, 1, 2].every((p) => sim.pawns.state[p] !== PawnState.RETURNING),
     contract: (sim, demo) => demo.showcaseIndex === 0 && sim.pawns.count === 3,
   };
 
@@ -84,7 +90,7 @@ describe('demo sections', () => {
       demo.playSection(i);
       expect(demo.label).toContain(demo.sections[i].title);
       let reached = false;
-      for (let t = 0; t < 20 * 120 && demo.loops === 0; t++) {
+      for (let t = 0; t < 20 * 200 && demo.loops === 0; t++) {
         demo.tick();
         sim.tick();
         reached ||= demo.loops === 0 && outcomes[id](sim, demo);
