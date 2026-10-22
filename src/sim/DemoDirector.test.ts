@@ -71,6 +71,7 @@ describe('demo sections', () => {
     engine: (sim) => sim.world.salvage.credits >= 13 * MATERIAL_VALUE[Material.ENGINE_PART],
     deck: (sim) => sim.world.salvage.credits >= 45 * MATERIAL_VALUE[Material.DECK_PLATE],
     tearoff: (sim) => sim.world.debris.tilesUsed > 900 && sim.hazards.countOf(HazardKind.CARRIED_OFF) === 3,
+    fire: (sim) => sim.world.explosionsTotal >= 8 && sim.world.gas.burned > 1 && sim.world.gas.burningCount === 0,
     rescue: (sim) => sim.hazards.countOf(HazardKind.RESCUED) > 0 && sim.pawns.count === 4,
     haul: (sim) =>
       sim.world.salvage.deliveredByMaterial[Material.ENGINE_PART] === 13 &&

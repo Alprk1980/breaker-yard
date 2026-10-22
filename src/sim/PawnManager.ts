@@ -99,6 +99,16 @@ export const LAUNCH_SEARCH_RADIUS = 24;
  * left this long before anyone tries again, rather than being picked up over and over.
  */
 export const RESCUE_RETRY_TICKS = 600;
+/** Health and suit integrity lost per second at full fire intensity. */
+export const FIRE_DAMAGE = 20;
+export const FIRE_SUIT_DAMAGE = 10;
+/** Fire intensity at the pawn's tile that sends it running. */
+export const FIRE_FLEE = 0.2;
+/** Blast reach (tiles), and at the centre: health and suit lost, and the shove (tiles/s). */
+export const BLAST_RADIUS = 5;
+export const BLAST_DAMAGE = 70;
+export const BLAST_SUIT_DAMAGE = 40;
+export const BLAST_SHOVE = 10;
 
 /** A hauler's thruster force limit, mass * tiles/s^2 (the player's grapple has 150). */
 export const TUG_FORCE = 60;
@@ -135,8 +145,10 @@ export const PawnWarning = {
   STRESS: 0x08,
   /** Not on a floor tile. */
   ADRIFT: 0x10,
+  /** In or next to fire. */
+  FIRE: 0x20,
 } as const;
-export const PAWN_WARNING_BITS = 5;
+export const PAWN_WARNING_BITS = 6;
 
 /** Largest differential a pawn will cut through, in bar. */
 export const MAX_CUT_DELTA_BAR = 2.0;
@@ -215,6 +227,7 @@ const W_VENT = PawnWarning.VENT;
 const W_TOXIC = PawnWarning.TOXIC;
 const W_STRESS = PawnWarning.STRESS;
 const W_ADRIFT = PawnWarning.ADRIFT;
+const W_FIRE = PawnWarning.FIRE;
 const H_CUT_REFUSED = HazardKind.CUT_REFUSED_PRESSURE;
 const H_CUT_ABORTED = HazardKind.CUT_ABORTED_PRESSURE;
 const H_DECOMPRESSION = HazardKind.DECOMPRESSION;
@@ -225,6 +238,8 @@ const H_HAUL_ABANDONED = HazardKind.HAUL_ABANDONED;
 const H_KNOCKED_OUT = HazardKind.KNOCKED_OUT;
 const H_DIED = HazardKind.DIED;
 const H_RESCUED = HazardKind.RESCUED;
+const H_CUT_REFUSED_FUEL = HazardKind.CUT_REFUSED_FUEL;
+const FUEL = TileFlags.FUEL;
 const OPEN = GasCell.OPEN;
 const WALL = GasCell.WALL;
 const HEAVY_CUTTER = ToolKind.HEAVY_CUTTER;
@@ -471,6 +486,31 @@ export class PawnManager {
     }
   }
 
+  /**
+   * An explosion at tile (cx, cy): every pawn within `BLAST_RADIUS` is hurt and thrown
+   * outward, more the closer it was. A one-off event.
+   */
+  blast(cx: number, cy: number): void {
+    const bx = cx + 0.5;
+    const by = cy + 0.5;
+    for (let p = 0; p < MAX_PAWNS; p++) {
+      if (this.alive[p] === 0) continue;
+      const dx = this.pos[p * 2] - bx;
+      const dy = this.pos[p * 2 + 1] - by;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      if (d >= BLAST_RADIUS) continue;
+      const k = 1 - d / BLAST_RADIUS;
+      this.health[p] -= BLAST_DAMAGE * k;
+      this.suit[p] = Math.max(0, this.suit[p] - BLAST_SUIT_DAMAGE * k);
+      if (this.carriedBy[p] >= 0 || this.ride[p] >= 0) continue;
+      const ux = d > 1e-3 ? dx / d : 1;
+      const uy = d > 1e-3 ? dy / d : 0;
+      this.vel[p * 2] += ux * BLAST_SHOVE * k;
+      this.vel[p * 2 + 1] += uy * BLAST_SHOVE * k;
+      this.clamp[p] = 0;
+    }
+  }
+
   /** One fixed tick. Allocation-free. */
   tick(dt: number): void {
     this.scalars[S_DT] = dt;
@@ -500,14 +540,15 @@ export class PawnManager {
     const open = gas.cells[ni] === OPEN;
     const press = open ? gas.current[ni] : 0;
     const toxBar = open ? gas.toxin[ni] : 0;
+    const fireHere = open ? gas.fire[ni] : 0;
     const breathable = press >= BREATHABLE_BAR && toxBar < BREATHABLE_TOXIN_BAR;
     const o2Rate = breathable ? O2_REFILL : this.suit[p] < SUIT_BREACH ? -O2_DRAIN_BREACHED : -O2_DRAIN;
     const o2Raw = this.oxygen[p] + o2Rate * dt;
     const o2 = o2Raw > SUIT_O2 ? SUIT_O2 : o2Raw < 0 ? 0 : o2Raw;
     this.oxygen[p] = o2;
-    const suitRaw = this.suit[p] - toxBar * TOXIC_SUIT_DAMAGE * dt;
+    const suitRaw = this.suit[p] - (toxBar * TOXIC_SUIT_DAMAGE + fireHere * FIRE_SUIT_DAMAGE) * dt;
     this.suit[p] = suitRaw < 0 ? 0 : suitRaw;
-    const hpRaw = this.health[p] + (o2 <= 0 ? -SUFFOCATION_DAMAGE : HEAL_RATE) * dt;
+    const hpRaw = this.health[p] + ((o2 <= 0 ? -SUFFOCATION_DAMAGE : HEAL_RATE) - fireHere * FIRE_DAMAGE) * dt;
     const hp = hpRaw > MAX_HEALTH ? MAX_HEALTH : hpRaw;
     this.health[p] = hp;
     this.cellOf[p] = ni;
@@ -647,6 +688,7 @@ export class PawnManager {
       (impMag > FLEE_IMPULSE ? W_VENT : 0) |
       (gas.toxin[ty * w + tx] > TOXIC_WARN_BAR ? W_TOXIC : 0) |
       (onFloor ? 0 : W_ADRIFT) |
+      (gas.fire[ty * w + tx] > FIRE_FLEE ? W_FIRE : 0) |
       (this.stressNear(tx, ty) ? W_STRESS : 0);
     this.warnings[p] = (this.warnings[p] & W_PRESSURE) | live;
 
@@ -664,7 +706,9 @@ export class PawnManager {
       return;
     }
 
-    const vt = impMag > FLEE_IMPULSE ? this.ventTicks[p] + 1 : 0;
+    // A vent stream or flames at the pawn's feet both count as danger to run from.
+    const danger = impMag > FLEE_IMPULSE || gas.fire[ty * w + tx] > FIRE_FLEE;
+    const vt = danger ? this.ventTicks[p] + 1 : 0;
     this.ventTicks[p] = vt > 255 ? 255 : vt;
     const flying = st === RETURNING || st === RESCUE_FLY || st === RESCUE_CARRY;
     if (st !== FLEEING && !flying && (vt >= FLEE_CONFIRM_TICKS || !onFloor)) {
@@ -687,7 +731,7 @@ export class PawnManager {
         this.tickDisassembling(p, tx, ty);
         break;
       case FLEEING:
-        this.tickFleeing(p, tx, ty, impMag > FLEE_IMPULSE, impMag < CALM_IMPULSE);
+        this.tickFleeing(p, tx, ty, danger, !danger && impMag < CALM_IMPULSE);
         break;
       case APPROACHING:
         this.tickApproaching(p);
@@ -1330,6 +1374,12 @@ export class PawnManager {
     const oy = this.target[p * 2 + 1];
     if (!this.inReach(p, tx, ty, ox, oy)) {
       this.resumeNavigation(p);
+      return;
+    }
+    if ((this.world.tiles[oy * this.world.width + ox] & FUEL) !== 0) {
+      // A torch on a fuel tank is a bomb: leave it for whoever means it.
+      this.hazards.log(H_CUT_REFUSED_FUEL, p, ox, oy, this.world.tickCount, 0);
+      this.dropOrder(p, REFUSAL_SUSPEND_TICKS);
       return;
     }
     const gas = this.world.gas;

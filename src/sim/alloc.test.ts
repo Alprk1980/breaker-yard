@@ -132,6 +132,27 @@ describe('tick loop allocations', () => {
     expect(fleeing / TICKS).toBeLessThan(MAX_BYTES_PER_TICK);
   });
 
+  it('allocates nothing per tick while a cabin fire spreads and the crew runs from it', { timeout: 300_000 }, () => {
+    warmUpKernels(new World());
+    warmUpCrew(new Simulation());
+    const scenario = (sim: Simulation, measure: boolean): number => {
+      buildDemoHull(sim.world);
+      sim.resetCrew();
+      seedDemoCrew(sim);
+      sim.world.gas.ignite(sim.world.index(66, 64), 1);
+      if (measure) return bytesAllocatedDuring(sim, TICKS);
+      for (let t = 0; t < TICKS; t++) sim.tick();
+      return 0;
+    };
+    scenario(new Simulation(), false);
+    scenario(new Simulation(), false);
+    const sim = new Simulation();
+    const bytes = scenario(sim, true);
+    console.log(`new-space bytes over ${TICKS} sim ticks: fire=${bytes}`);
+    expect(sim.world.gas.burned).toBeGreaterThan(1);
+    expect(bytes / TICKS).toBeLessThan(MAX_BYTES_PER_TICK);
+  });
+
   it('allocates nothing per tick through a space rescue: suit air, knockout, flight out, carry back', { timeout: 300_000 }, () => {
     warmUpKernels(new World());
     warmUpCrew(new Simulation());

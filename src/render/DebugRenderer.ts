@@ -82,6 +82,17 @@ const TILE_FLOOR = packRGBA(36, 42, 56, 255);
 const TILE_BULKHEAD = packRGBA(100, 110, 128, 255);
 const TILE_GIRDER = packRGBA(150, 128, 92, 255);
 const TILE_LEAK = packRGBA(170, 60, 170, 255);
+const TILE_FUEL = packRGBA(200, 70, 40, 255);
+/** Fire overlay, by intensity bucket: dull red embers to bright yellow flame. */
+const FIRE_BUCKETS = 6;
+const FIRE_COLORS: readonly string[] = [
+  'rgba(185, 28, 28, 0.45)',
+  'rgba(220, 38, 38, 0.6)',
+  'rgba(234, 88, 12, 0.7)',
+  'rgba(249, 115, 22, 0.8)',
+  'rgba(251, 191, 36, 0.85)',
+  'rgba(253, 224, 71, 0.9)',
+];
 
 const Tool = {
   NONE: 0,
@@ -96,8 +107,15 @@ const Tool = {
 
 /** Label per warning bitmask, built once so drawing a label never builds a string. */
 function buildWarningLabels(): string[] {
-  const names = ['PRESSURE', 'VENT', 'TOXIC', 'STRESS', 'ADRIFT'];
-  const bits = [PawnWarning.PRESSURE, PawnWarning.VENT, PawnWarning.TOXIC, PawnWarning.STRESS, PawnWarning.ADRIFT];
+  const names = ['PRESSURE', 'VENT', 'TOXIC', 'STRESS', 'ADRIFT', 'FIRE'];
+  const bits = [
+    PawnWarning.PRESSURE,
+    PawnWarning.VENT,
+    PawnWarning.TOXIC,
+    PawnWarning.STRESS,
+    PawnWarning.ADRIFT,
+    PawnWarning.FIRE,
+  ];
   const out: string[] = [];
   for (let mask = 0; mask < 1 << PAWN_WARNING_BITS; mask++) {
     const parts: string[] = [];
@@ -262,6 +280,7 @@ export class DebugRenderer {
       this.paintGas();
       ctx.drawImage(this.gasCanvas, 0, 0, width, height);
     }
+    if (this.world.gas.burningCount > 0) this.drawFire();
 
     if (this.showStress) this.drawStress();
     this.drawZones();
@@ -606,10 +625,34 @@ export class DebugRenderer {
       if ((f & TileFlags.GIRDER) !== 0) c = TILE_GIRDER;
       else if ((f & TileFlags.BULKHEAD) !== 0) c = TILE_BULKHEAD;
       else if ((f & TileFlags.HAZARD_LEAK) !== 0) c = TILE_LEAK;
+      if ((f & TileFlags.FUEL) !== 0) c = TILE_FUEL;
       else if ((f & TileFlags.FLOOR) !== 0) c = TILE_FLOOR;
       px[i] = c;
     }
     this.tileCtx.putImageData(this.tileImage, 0, 0);
+  }
+
+  /** Burning cells as tile fills, one path per intensity bucket. Only runs while something burns. */
+  private drawFire(): void {
+    const ctx = this.ctx;
+    const gas = this.world.gas;
+    const list = gas.burningList;
+    const fire = gas.fire;
+    const w = this.world.width;
+    for (let b = 0; b < FIRE_BUCKETS; b++) {
+      let any = false;
+      ctx.beginPath();
+      for (let k = 0; k < gas.burningCount; k++) {
+        const i = list[k];
+        const bucket = (fire[i] * FIRE_BUCKETS) | 0;
+        if ((bucket >= FIRE_BUCKETS ? FIRE_BUCKETS - 1 : bucket) !== b) continue;
+        any = true;
+        ctx.rect(i % w, (i / w) | 0, 1, 1);
+      }
+      if (!any) continue;
+      ctx.fillStyle = FIRE_COLORS[b];
+      ctx.fill();
+    }
   }
 
   private paintGas(): void {

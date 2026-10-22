@@ -37,6 +37,19 @@ export const MAX_STABLE_FLOW_KEEP = 0.9;
  */
 export const STREAM_IMPULSE_GAIN = 0.5;
 
+/** Fire needs at least this much gas (bar) to burn; below it, it is smothered. */
+export const FIRE_MIN_BAR = 0.3;
+/** Growth toward full intensity per second, spread to each open neighbour per second (times intensity). */
+export const FIRE_GROWTH = 0.6;
+export const FIRE_SPREAD = 0.35;
+/** Gas a fully burning cell consumes per second, in bar; half of it turns to smoke (toxin). */
+export const FIRE_BURN = 0.12;
+export const FIRE_SMOKE = 0.5;
+/** Share of a smothered fire left after each tick. */
+export const FIRE_SMOTHER = 0.85;
+/** Intensity below which a fire is out. */
+export const FIRE_OUT = 0.01;
+
 export interface Vec2 {
   x: number;
   y: number;
@@ -104,7 +117,13 @@ export class GasGrid {
    * number fields: a field that starts as integer 0 and turns fractional changes its
    * representation, which keeps invalidating the optimised kernels that update it.
    */
-  private readonly vented = new Float64Array(2);
+  private readonly vented = new Float64Array(4);
+  /** Fire intensity per cell, 0 (none) to 1 (fully ablaze). Only open cells burn. */
+  readonly fire: Float32Array;
+  private readonly fireNext: Float32Array;
+  /** Cells burning after the last `fireStep`, and how many. */
+  readonly burningList: Int32Array;
+  burningCount = 0;
 
   /** Running total of gas drained into vacuum cells since construction or `clear()`. */
   get vacuumAbsorbed(): number {
@@ -124,6 +143,16 @@ export class GasGrid {
     this.vented[1] = value;
   }
 
+  /** Running total of gas consumed by fire (net of what it turned into smoke). */
+  get burned(): number {
+    return this.vented[2];
+  }
+
+  /** Sum of fire intensity after the last `fireStep` (in the tally array, like the totals above). */
+  get fireTotal(): number {
+    return this.vented[3];
+  }
+
   private readonly scratch: Vec2 = { x: 0, y: 0 };
   /** Result slot for `measurePressureDelta`: a double returned from a call that V8 does not inline gets boxed. */
   private readonly delta = new Float64Array(1);
@@ -141,6 +170,9 @@ export class GasGrid {
     this.flowY = new Float32Array(this.cellCount);
     this.outflow = new Float32Array(this.cellCount);
     this.toxinShare = new Float32Array(this.cellCount);
+    this.fire = new Float32Array(this.cellCount);
+    this.fireNext = new Float32Array(this.cellCount);
+    this.burningList = new Int32Array(this.cellCount);
     this.k = Math.min(Math.max(diffusion, 0), MAX_STABLE_DIFFUSION);
     this.substeps = substeps;
   }
@@ -194,7 +226,75 @@ export class GasGrid {
       this.next[i] = 0;
       this.toxin[i] = 0;
       this.toxinNext[i] = 0;
+      this.fire[i] = 0;
     }
+  }
+
+  /** Sets cell `i` burning at least at `intensity`, if it is open and has the gas to burn. */
+  ignite(i: number, intensity: number): void {
+    if (this.cells[i] !== GasCell.OPEN || this.current[i] < FIRE_MIN_BAR) return;
+    if (this.fire[i] < intensity) this.fire[i] = intensity;
+    if (this.burningCount === 0) this.burningCount = 1;
+  }
+
+  /**
+   * One fixed tick of fire, after `step`. A burning cell with gas to spare grows toward full
+   * intensity, spreads to open neighbours that have gas, and burns its gas (half to smoke,
+   * which is toxin); one without enough gas is smothered. Records the burning cells in
+   * `burningList`. Does nothing while nothing burns. Allocation-free.
+   */
+  fireStep(dt: number): void {
+    if (this.burningCount === 0) return;
+    const n = this.cellCount;
+    const w = this.width;
+    const h = this.height;
+    const f = this.fire;
+    const fn = this.fireNext;
+    const cells = this.cells;
+    const cur = this.current;
+    const tox = this.toxin;
+    const OPEN = GasCell.OPEN;
+    fn.fill(0);
+    let burned = 0;
+    for (let i = 0; i < n; i++) {
+      const fi = f[i];
+      if (fi <= FIRE_OUT || cells[i] !== OPEN) continue;
+      const p = cur[i];
+      if (p < FIRE_MIN_BAR) {
+        fn[i] += fi * FIRE_SMOTHER;
+        continue;
+      }
+      fn[i] += fi + FIRE_GROWTH * dt * (1 - fi);
+      const want = FIRE_BURN * fi * dt;
+      const take = want < p ? want : p;
+      const left = p - take * (1 - FIRE_SMOKE);
+      cur[i] = left;
+      const smoke = tox[i] + take * FIRE_SMOKE;
+      tox[i] = smoke < left ? smoke : left;
+      burned += take * (1 - FIRE_SMOKE);
+      const spread = FIRE_SPREAD * fi * dt;
+      const x = i % w;
+      const y = (i / w) | 0;
+      if (x > 0 && cells[i - 1] === OPEN && cur[i - 1] >= FIRE_MIN_BAR) fn[i - 1] += spread;
+      if (x < w - 1 && cells[i + 1] === OPEN && cur[i + 1] >= FIRE_MIN_BAR) fn[i + 1] += spread;
+      if (y > 0 && cells[i - w] === OPEN && cur[i - w] >= FIRE_MIN_BAR) fn[i - w] += spread;
+      if (y < h - 1 && cells[i + w] === OPEN && cur[i + w] >= FIRE_MIN_BAR) fn[i + w] += spread;
+    }
+    let count = 0;
+    let total = 0;
+    const list = this.burningList;
+    for (let i = 0; i < n; i++) {
+      const v = fn[i] > 1 ? 1 : fn[i];
+      const out = v <= FIRE_OUT ? 0 : v;
+      f[i] = out;
+      if (out > 0) {
+        list[count++] = i;
+        total += out;
+      }
+    }
+    this.burningCount = count;
+    this.vented[3] = total;
+    this.vented[2] += burned;
   }
 
   getCell(x: number, y: number): GasCell {
@@ -243,6 +343,10 @@ export class GasGrid {
     this.flowY.fill(0);
     this.vacuumAbsorbed = 0;
     this.toxinVented = 0;
+    this.vented[2] = 0;
+    this.vented[3] = 0;
+    this.fire.fill(0);
+    this.burningCount = 0;
   }
 
   /** Total gas held in OPEN cells. */
