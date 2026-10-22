@@ -7,6 +7,7 @@ npm install
 npm run dev        # http://localhost:5173
 npm test           # unit tests, including the zero-allocation tick check
 npm run build      # strict typecheck + production bundle
+node tools/qwen-gen.mjs materials   # regenerate the material table with the local model
 ```
 
 ## Phase 1 layout
@@ -29,12 +30,25 @@ npm run build      # strict typecheck + production bundle
 | `src/sim/HazardLog.ts` | Ring buffer of hazard events (refused cuts, decompression, adrift) written from the tick loop |
 | `src/sim/Simulation.ts` | One 20 Hz tick: world, cost grid, orders, pawns |
 
+## Debris and salvage layout
+
+| File | What it does |
+| --- | --- |
+| `src/sim/DebrisField.ts` | Tears loose tile groups out of the grid as rigid bodies; drift, spin, impulse contacts against the grid and each other, the grapple, delivery into bins |
+| `src/sim/Salvage.ts` | Salvage bins (furnace, processor, barge) and the ledger: credits, missort losses, value destroyed by the torch |
+| `src/sim/materials.ts` | Per-tile `Material` and `Bin` ids, and the material table as typed arrays |
+| `src/sim/materialSchema.ts` | Validator and balance check for `src/data/materials.json` (self-contained, so the generator can import it) |
+| `src/data/materials.json` | The material table: value, mass, bin and colour per material. Generated, not hand-edited |
+| `src/sim/DemoDirector.ts` | Attract mode: a scripted salvage run (crew cut, engine to the barge, deck to the furnace, hull torn free) played through the player's controls, looping |
+| `tools/qwen-gen.mjs`, `prompts/materials.txt` | Generate, validate and repair loop against the local model; attempts land in `generated/` |
+
 ## Controls
 
 | Input | Action |
 | --- | --- |
 | Left click on a pawn | Select it and show its route |
-| Left click / drag elsewhere | Cut tile (wall or girder becomes floor, floor becomes vacuum) |
+| Left click / drag on debris | Grapple it; drag to tow, release to let go |
+| Left click / drag elsewhere | Cut tile (wall or girder becomes floor, or vacuum out in open space; floor becomes vacuum) |
 | Shift + left click / drag | Designate walls for deconstruction; again on an order cancels it |
 | P | Spawn a pawn at the cursor |
 | Esc | Deselect |
@@ -46,6 +60,7 @@ npm run build      # strict typecheck + production bundle
 | G / T | Toggle gas / stress layers |
 | Enter, `.` | Pause, single-step while paused |
 | R | Reset the demo hull |
+| M | Start or stop the self-playing demo (on at load; any click on the canvas also takes over) |
 
 ## Models in brief
 
@@ -63,3 +78,10 @@ npm run build      # strict typecheck + production bundle
 
 **Zero allocation.** All float maths in the pawn tick lives in `tickPawn`, which runs for every pawn every tick and so stays optimised; the per-state functions are integer-only, because they are cold enough to run in V8's interpreter, where double arithmetic allocates. Doubles cross calls through a `Float64Array` rather than as arguments. `alloc.test.ts` checks the world tick sealed, venting, snapping and venting toxin, and the full simulation tick with pawns working, refusing and fleeing.
 
+**Tearing free.** Whenever the lattice rebuilds with floating nodes, or a tile disappears, the world flood-fills its tiles. Neighbours hold together unless both are girders and the member between them has snapped, so frames part where members break and decks and bulkheads go with whatever they are welded to. Every group with no grounded node is lifted out of the grid into a rigid body, along with its materials, the air inside it (`gasCarried`, so `totalMass() + vacuumAbsorbed + gasCarried` is conserved) and a push from any gas venting through it. A map with no anchors at all never tears. The torch only leaves floor where a cut tile borders a deck, so a cut gantry arm really parts. Cutting one arm of the demo hull overloads the other, which shatters, and the 1,079-tile hull floats off with its crew aboard: riders move with the wreck and float free at its velocity when it is delivered.
+
+**Debris.** Bodies are tile offsets from a mass-weighted centre, with position, angle, velocity and spin, and inertia summed over tiles. Contacts are sampled at tile centres against grid tiles, the map edge and cells stamped by other bodies. Each one applies an impulse at the contact point (restitution 0.2, friction 0.4, which gives spin) and removes 80% of the penetration per tick, so a tile can overlap a wall by up to half a tile. Speed is capped at 8 tiles/s, and spin so that the outermost tile stays under 8 tiles/s, which keeps contacts from tunnelling. The grapple is a critically damped spring per unit mass, limited to 150 force: a deck chunk snaps to the cursor, while the hull (mass ~680) creeps.
+
+**Salvage.** Each tile has a material (deck plate, hull plate, girder alloy, engine part, electronics) with a value, a mass and the bin it belongs in. Debris with every tile inside a bin is consumed: right-bin tiles pay full value, the rest 25%. The bins are smaller than the hull, so it has to be cut apart, and a torch cut destroys the value of the tile it removes. The material table is generated by the local model behind `materialTableErrors`, which also prices the demo hull: 6,000-20,000 credits sorted, at most 60% in any one bin, and engine parts and electronics worth at least 3x any plating.
+
+**Zero allocation, debris.** Drifting and towing (contacts, impulses, the grapple) allocate nothing per tick. Building a body is a one-off event that runs too rarely to stay optimised: V8 drops the optimised per-tile code once the warm-up world is collected, so a tear costs about 640 B per lifted tile, once. `alloc.test.ts` budgets it per tile and holds the ticks around it to the per-tick limit.

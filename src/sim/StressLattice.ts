@@ -71,6 +71,8 @@ export class StressLattice {
   totalSnapped = 0;
   groundedCount = 0;
   floatingCount = 0;
+  /** Bumped by every `rebuildTopology()`, so callers can tell when grounding may have changed. */
+  topologyVersion = 0;
 
   /** Grounded, non-anchor nodes: the only ones the solver touches. */
   private readonly solveList: Int32Array;
@@ -297,6 +299,7 @@ export class StressLattice {
     this.floatingCount = floatingCount;
     this.topologyDirty = false;
     this.converged = false;
+    this.topologyVersion++;
   }
 
   /** Performs up to `iterations` SOR sweeps; returns how many ran. */

@@ -1,7 +1,8 @@
+import { B_COS, B_SIN, B_SPIN, B_VX, B_VY, B_X, B_Y, BODY_STRIDE } from './DebrisField';
 import { GasCell, type Vec2 } from './GasGrid';
 import { HazardKind, type HazardLog } from './HazardLog';
 import { COST_IMPASSABLE, type PathGrid } from './PathGrid';
-import { TileFlags, isSolid } from './TileFlags';
+import { isSolid } from './TileFlags';
 import { ToolKind, type WorkOrderQueue } from './WorkOrderQueue';
 import type { World } from './World';
 
@@ -100,6 +101,7 @@ const H_CUT_ABORTED = HazardKind.CUT_ABORTED_PRESSURE;
 const H_DECOMPRESSION = HazardKind.DECOMPRESSION;
 const H_ADRIFT = HazardKind.ADRIFT;
 const H_UNREACHABLE = HazardKind.UNREACHABLE;
+const H_CARRIED_OFF = HazardKind.CARRIED_OFF;
 const OPEN = GasCell.OPEN;
 const WALL = GasCell.WALL;
 const HEAVY_CUTTER = ToolKind.HEAVY_CUTTER;
@@ -155,6 +157,10 @@ export class PawnManager {
   readonly path = new Int32Array(MAX_PAWNS * MAX_PATH);
   readonly pathLen = new Int16Array(MAX_PAWNS);
   readonly pathStep = new Int16Array(MAX_PAWNS);
+  /** Debris body the pawn is riding, or -1; with that body's generation and the pawn's body-local position. */
+  readonly ride = new Int16Array(MAX_PAWNS).fill(-1);
+  readonly rideGen = new Uint16Array(MAX_PAWNS);
+  readonly rideLocal = new Float32Array(MAX_PAWNS * 2);
   count = 0;
 
   private readonly scalars = new Float64Array(4);
@@ -194,6 +200,7 @@ export class PawnManager {
     this.timer[p] = 0;
     this.pathLen[p] = 0;
     this.pathStep[p] = 0;
+    this.ride[p] = -1;
     this.count++;
     return p;
   }
@@ -228,6 +235,34 @@ export class PawnManager {
     return best;
   }
 
+  /**
+   * Puts every pawn standing on a cell that was lifted into debris this tick aboard that
+   * body. A rider drops its work and moves with the wreck until the wreck is delivered,
+   * then floats free with the wreck's velocity.
+   */
+  boardDebris(): void {
+    const debris = this.world.debris;
+    if (debris.liftedCount === 0) return;
+    const w = this.world.width;
+    for (let p = 0; p < MAX_PAWNS; p++) {
+      if (this.alive[p] === 0) continue;
+      const tx = Math.floor(this.pos[p * 2]);
+      const ty = Math.floor(this.pos[p * 2 + 1]);
+      const b = debris.liftedBy[ty * w + tx];
+      if (b < 0) continue;
+      this.dropOrder(p, 0);
+      this.clamp[p] = 0;
+      this.anchor[p] = -1;
+      this.ride[p] = b;
+      this.rideGen[p] = debris.generation[b];
+      // Bodies are born unrotated, so local = world - centre of mass.
+      const o = b * BODY_STRIDE;
+      this.rideLocal[p * 2] = this.pos[p * 2] - debris.body[o + B_X];
+      this.rideLocal[p * 2 + 1] = this.pos[p * 2 + 1] - debris.body[o + B_Y];
+      this.hazards.log(H_CARRIED_OFF, p, tx, ty, this.world.tickCount, 0);
+    }
+  }
+
   /** One fixed tick. Allocation-free. */
   tick(dt: number): void {
     this.scalars[S_DT] = dt;
@@ -248,10 +283,33 @@ export class PawnManager {
     const gas = world.gas;
     const sc = this.scalars;
     const dt = sc[S_DT];
-
-    // --- Physics: decompression drag against magboots, suit thrusters, clamping ---
     const pos = this.pos;
     const vel = this.vel;
+
+    // --- Riding a wreck: carried rigidly with it, doing nothing else ---
+    const ride = this.ride[p];
+    if (ride >= 0) {
+      const debris = world.debris;
+      if (debris.alive[ride] === 1 && debris.generation[ride] === this.rideGen[p]) {
+        const s = debris.body;
+        const o = ride * BODY_STRIDE;
+        const lx = this.rideLocal[p * 2];
+        const ly = this.rideLocal[p * 2 + 1];
+        const rx = s[o + B_COS] * lx - s[o + B_SIN] * ly;
+        const ry = s[o + B_SIN] * lx + s[o + B_COS] * ly;
+        pos[p * 2] = s[o + B_X] + rx;
+        pos[p * 2 + 1] = s[o + B_Y] + ry;
+        vel[p * 2] = s[o + B_VX] - s[o + B_SPIN] * ry;
+        vel[p * 2 + 1] = s[o + B_VY] + s[o + B_SPIN] * rx;
+        this.magBoot[p] = 1;
+        this.warnings[p] = 0;
+        return;
+      }
+      // The wreck went into a bin: float free at the speed it was carrying us.
+      this.ride[p] = -1;
+    }
+
+    // --- Physics: decompression drag against magboots, suit thrusters, clamping ---
     const heading = this.heading;
     const w = world.width;
     let tx = Math.floor(pos[p * 2]);
@@ -474,8 +532,7 @@ export class PawnManager {
 
   /** The wall is through: remove the tile and its structural node, and close the order. */
   private finishCut(p: number, ox: number, oy: number): void {
-    this.world.lattice.removeNode(ox, oy);
-    this.world.setTile(ox, oy, TileFlags.FLOOR);
+    this.world.cutTile(ox, oy);
     this.orders.complete(this.orderSlot[p]);
     this.orderSlot[p] = -1;
     this.progress[p] = 0;

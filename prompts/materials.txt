@@ -1,0 +1,48 @@
+You are writing the salvage material table for Breaker-Yard, a 2D top-down orbital ship-breaking simulation
+(think Hardspace: Shipbreaker crossed with RimWorld). A crew cuts derelict ships apart with torches. Chunks that
+come loose drift free as debris, and the player grapples them into one of three salvage bins:
+
+- furnace: melts down bulk ferrous scrap
+- processor: reclaims structural alloys and machined parts for reuse
+- barge: takes intact, high-value components to be resold whole
+
+Each tile of a ship is made of one material. A chunk delivered into a bin pays each tile's value if the tile
+belongs in that bin, and only 25% of its value if it does not, so players want to cut chunks into pure pieces.
+Mass decides how hard a chunk is to grapple and how hard it hits things.
+
+Write exactly these 5 materials, one entry each, with these ids:
+- deck-plate: the floor plating inside the ship (by far the most common tile)
+- hull-plate: interior bulkhead walls
+- girder-alloy: the load-bearing frame girders
+- engine-part: tiles of the engine block bolted to the frame
+- electronics: consoles and control equipment
+
+The demo ship contains 915 deck-plate, 24 hull-plate, 115 girder-alloy, 13 engine-part and 6 electronics tiles.
+
+Rules (an automatic check rejects anything that breaks them):
+- id: exactly one of the five ids above
+- name: 3-24 characters, a short in-world label (e.g. "Ferrous Deck Plate")
+- description: 20-120 characters, one plain sentence of in-world flavour, no emoji
+- value: whole number of credits per tile, 1-500
+- mass: number from 0.2 to 10, in girder units (a plain girder tile is about 1)
+- bin: "furnace", "processor" or "barge"; every bin must receive at least one material
+- color: lowercase "#rrggbb", all five different, readable on a near-black background
+- mass rises deck-plate <= hull-plate <= girder-alloy, and engine-part is the heaviest of all
+- engine-part and electronics are each worth at least 3x the per-tile value of every plate and girder material
+- the demo ship, sorted perfectly, pays between 6000 and 20000 credits in total (multiply each value by its tile
+  count above and add them up; check your arithmetic)
+- no single bin may take more than 60% of that sorted total, so sorting matters
+
+Answer with only a JSON array of 5 objects with exactly these fields, like:
+[
+  {
+    "id": "deck-plate",
+    "name": "Ferrous Deck Plate",
+    "description": "Scuffed walkway plating, rolled thin and welded down in long strips.",
+    "value": 4,
+    "mass": 0.5,
+    "bin": "furnace",
+    "color": "#5b6476"
+  }
+]
+{{ask}}

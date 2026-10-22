@@ -1,4 +1,7 @@
 import { INJECT_PRESSURE_BAR } from '../sim/constants';
+import { B_COS, B_SIN, B_X, B_Y, BODY_STRIDE, MAX_BODIES } from '../sim/DebrisField';
+import type { DemoDirector } from '../sim/DemoDirector';
+import { MATERIAL_COLORS, MATERIAL_COUNT } from '../sim/materials';
 import { MAX_PATH, PAWN_STATE_NAMES, PAWN_WARNING_BITS, PawnState, PawnWarning } from '../sim/PawnManager';
 import type { Simulation } from '../sim/Simulation';
 import { TileFlags, isLoadBearing, isSolid } from '../sim/TileFlags';
@@ -31,6 +34,23 @@ const COLOR_SELECTED = '#ffffff';
 const COLOR_PAWN_TEXT = '#e2e8f0';
 const COLOR_PAWN_WARNING = '#f87171';
 const COLOR_HEADING = '#0f172a';
+const COLOR_GRAPPLE = 'rgba(56, 189, 248, 0.95)';
+const COLOR_DEBRIS_EDGE = 'rgba(7, 10, 18, 0.55)';
+/** Outline and label per `Bin`. */
+const ZONE_COLORS: readonly string[] = ['#000000', '#f97316', '#a3e635', '#38bdf8'];
+const ZONE_FILLS: readonly string[] = [
+  'rgba(0, 0, 0, 0)',
+  'rgba(249, 115, 22, 0.07)',
+  'rgba(163, 230, 53, 0.07)',
+  'rgba(56, 189, 248, 0.07)',
+];
+const ZONE_LABELS: readonly string[] = ['', 'FURNACE', 'PROCESSOR', 'BARGE'];
+const ZONE_FONT = '12px ui-monospace, SFMono-Regular, Menlo, monospace';
+const BANNER_FONT = '16px ui-monospace, SFMono-Regular, Menlo, monospace';
+const COLOR_BANNER = '#f8fafc';
+const COLOR_BANNER_BG = 'rgba(7, 10, 18, 0.78)';
+const COLOR_DEMO_CURSOR = '#fb923c';
+const DEMO_HINT = 'DEMO  -  click or press M to take over';
 const PAWN_FONT = '11px ui-monospace, SFMono-Regular, Menlo, monospace';
 /** Fill per PawnState. */
 const PAWN_COLORS: readonly string[] = ['#94a3b8', '#38bdf8', '#facc15', '#fb923c', '#f43f5e'];
@@ -50,6 +70,7 @@ const Tool = {
   PAN: 3,
   DESIGNATE: 4,
   UNDESIGNATE: 5,
+  GRAPPLE: 6,
 } as const;
 
 /** Label per warning bitmask, built once so drawing a label never builds a string. */
@@ -71,7 +92,8 @@ function buildWarningLabels(): string[] {
  * event handlers are created in the constructor; `render()` only writes into them.
  *
  * Controls:
- *   Left click            select the pawn under the cursor; elsewhere, cut tile (drag to keep cutting)
+ *   Left click            select the pawn under the cursor; on debris, grapple it (drag to tow);
+ *                         elsewhere, cut tile (drag to keep cutting)
  *   Shift + left click    designate a wall for deconstruction (drag for more; again to cancel)
  *   Right click / hold    inject 10 bar gas
  *   Middle click          toggle dock anchor on a girder
@@ -95,11 +117,13 @@ export class DebugRenderer {
 
   hoverX = -1;
   hoverY = -1;
-  /** Cursor position in fractional tile units, for picking pawns. */
-  private hoverFx = -1;
-  private hoverFy = -1;
+  /** Cursor position in fractional tile units, for picking pawns and debris. */
+  hoverFx = -1;
+  hoverFy = -1;
   /** Pawn whose route is drawn, or -1. */
   selectedPawn = -1;
+  /** Attract-mode script, whose cursor and caption are drawn while it runs. */
+  demo: DemoDirector | null = null;
 
   private readonly world: World;
   private readonly warningLabels = buildWarningLabels();
@@ -213,6 +237,7 @@ export class DebugRenderer {
     }
 
     if (this.showStress) this.drawStress();
+    this.drawZones();
 
     if (this.hoverX >= 0) {
       ctx.strokeStyle = COLOR_HOVER;
@@ -223,9 +248,146 @@ export class DebugRenderer {
     // Orders, routes and pawns are drawn in device pixels, rounded to integers so canvas
     // arguments stay small integers rather than boxed doubles.
     ctx.setTransform(1, 0, 0, 1, 0, 0);
+    this.drawDebris();
+    this.drawZoneLabels();
     this.drawOrders();
     if (this.selectedPawn >= 0) this.drawRoute(this.selectedPawn);
     this.drawPawns();
+    if (this.demo !== null && this.demo.active) this.drawDemo(this.demo);
+  }
+
+  /** The demo's torch or grapple cursor, and its caption across the top. */
+  private drawDemo(demo: DemoDirector): void {
+    const ctx = this.ctx;
+    const z = this.zoom;
+    if (demo.cursorX >= 0) {
+      const sx = (this.originX() + demo.cursorX * z) | 0;
+      const sy = (this.originY() + demo.cursorY * z) | 0;
+      const r = z > 6 ? z : 6;
+      ctx.strokeStyle = COLOR_DEMO_CURSOR;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(sx - r - 4, sy);
+      ctx.lineTo(sx - 3, sy);
+      ctx.moveTo(sx + 3, sy);
+      ctx.lineTo(sx + r + 4, sy);
+      ctx.moveTo(sx, sy - r - 4);
+      ctx.lineTo(sx, sy - 3);
+      ctx.moveTo(sx, sy + 3);
+      ctx.lineTo(sx, sy + r + 4);
+      ctx.stroke();
+      ctx.strokeRect(sx - r, sy - r, r * 2, r * 2);
+    }
+    ctx.font = BANNER_FONT;
+    ctx.textBaseline = 'top';
+    ctx.fillStyle = COLOR_BANNER_BG;
+    ctx.fillRect(12, 12, 640, 52);
+    ctx.fillStyle = COLOR_BANNER;
+    ctx.fillText(demo.label, 22, 20);
+    ctx.fillStyle = COLOR_DEMO_CURSOR;
+    ctx.fillText(DEMO_HINT, 22, 42);
+  }
+
+  /** Salvage bins: tinted rectangles in tile space. Zone corners are whole tiles. */
+  private drawZones(): void {
+    const ctx = this.ctx;
+    const S = this.world.salvage;
+    ctx.lineWidth = 0.25;
+    for (let z = 0; z < S.zoneCount; z++) {
+      const bin = S.zoneBin[z];
+      const x0 = S.zoneRect[z * 4] | 0;
+      const y0 = S.zoneRect[z * 4 + 1] | 0;
+      const w = (S.zoneRect[z * 4 + 2] | 0) - x0;
+      const h = (S.zoneRect[z * 4 + 3] | 0) - y0;
+      ctx.fillStyle = ZONE_FILLS[bin];
+      ctx.fillRect(x0, y0, w, h);
+      ctx.strokeStyle = ZONE_COLORS[bin];
+      ctx.strokeRect(x0, y0, w, h);
+    }
+  }
+
+  private drawZoneLabels(): void {
+    const ctx = this.ctx;
+    const S = this.world.salvage;
+    const z = this.zoom;
+    const ox = this.originX();
+    const oy = this.originY();
+    ctx.font = ZONE_FONT;
+    ctx.textBaseline = 'top';
+    for (let k = 0; k < S.zoneCount; k++) {
+      const bin = S.zoneBin[k];
+      ctx.fillStyle = ZONE_COLORS[bin];
+      ctx.fillText(ZONE_LABELS[bin], ox + (S.zoneRect[k * 4] | 0) * z + 4, oy + (S.zoneRect[k * 4 + 1] | 0) * z + 4);
+    }
+  }
+
+  /**
+   * Debris bodies as rotated tile quads in device pixels, one path per material per body.
+   * Corners are rounded to whole pixels so every canvas argument is a small integer.
+   */
+  private drawDebris(): void {
+    const D = this.world.debris;
+    if (D.count === 0 && D.grabBody < 0) return;
+    const ctx = this.ctx;
+    const z = this.zoom;
+    const ox = this.originX();
+    const oy = this.originY();
+    const s = D.body;
+    const local = D.tileLocal;
+    ctx.strokeStyle = COLOR_DEBRIS_EDGE;
+    ctx.lineWidth = 1;
+    for (let b = 0; b < MAX_BODIES; b++) {
+      if (D.alive[b] === 0) continue;
+      const o = b * BODY_STRIDE;
+      const c = s[o + B_COS];
+      const sn = s[o + B_SIN];
+      const cx = ox + s[o + B_X] * z;
+      const cy = oy + s[o + B_Y] * z;
+      // Half-tile axis vectors in pixels: u along the body's x, v along its y.
+      const ux = c * 0.5 * z;
+      const uy = sn * 0.5 * z;
+      const vx = -sn * 0.5 * z;
+      const vy = c * 0.5 * z;
+      const start = D.tileStart[b];
+      const end = start + D.tileCount[b];
+      for (let m = 1; m < MATERIAL_COUNT; m++) {
+        let any = false;
+        ctx.beginPath();
+        for (let t = start; t < end; t++) {
+          if (D.tileMaterial[t] !== m) continue;
+          any = true;
+          const lx = local[t * 2];
+          const ly = local[t * 2 + 1];
+          const px = cx + (c * lx - sn * ly) * z;
+          const py = cy + (sn * lx + c * ly) * z;
+          ctx.moveTo((px - ux - vx) | 0, (py - uy - vy) | 0);
+          ctx.lineTo((px + ux - vx) | 0, (py + uy - vy) | 0);
+          ctx.lineTo((px + ux + vx) | 0, (py + uy + vy) | 0);
+          ctx.lineTo((px - ux + vx) | 0, (py - uy + vy) | 0);
+          ctx.closePath();
+        }
+        if (!any) continue;
+        ctx.fillStyle = MATERIAL_COLORS[m];
+        ctx.fill();
+        if (z >= LABEL_ZOOM) ctx.stroke();
+      }
+    }
+
+    const g = D.grabBody;
+    if (g >= 0) {
+      const o = g * BODY_STRIDE;
+      const c = s[o + B_COS];
+      const sn = s[o + B_SIN];
+      const gx = s[o + B_X] + c * D.grab[0] - sn * D.grab[1];
+      const gy = s[o + B_Y] + sn * D.grab[0] + c * D.grab[1];
+      ctx.strokeStyle = COLOR_GRAPPLE;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo((ox + gx * z) | 0, (oy + gy * z) | 0);
+      ctx.lineTo((ox + D.grab[2] * z) | 0, (oy + D.grab[3] * z) | 0);
+      ctx.stroke();
+      ctx.strokeRect(((ox + gx * z) | 0) - 3, ((oy + gy * z) | 0) - 3, 6, 6);
+    }
   }
 
   private drawOrders(): void {
@@ -535,7 +697,12 @@ export class DebugRenderer {
       } else if (e.button === 0) {
         const picked = this.sim.pawns.pawnNear(this.hoverFx, this.hoverFy, 0.75);
         this.selectedPawn = picked;
-        if (picked < 0) {
+        const debris = this.world.debris;
+        const body = picked < 0 ? debris.bodyAt(this.hoverFx, this.hoverFy) : -1;
+        if (body >= 0) {
+          this.tool = Tool.GRAPPLE;
+          debris.grabAt(body, this.hoverFx, this.hoverFy);
+        } else if (picked < 0) {
           this.tool = Tool.CUT;
           if (this.hoverX >= 0) this.world.cutTile(this.hoverX, this.hoverY);
         }
@@ -559,7 +726,9 @@ export class DebugRenderer {
       const prevY = this.hoverY;
       this.screenToTile(e.clientX, e.clientY);
       const moved = this.hoverX >= 0 && (this.hoverX !== prevX || this.hoverY !== prevY);
-      if (this.tool === Tool.CUT && moved) {
+      if (this.tool === Tool.GRAPPLE) {
+        this.world.debris.setGrappleTarget(this.hoverFx, this.hoverFy);
+      } else if (this.tool === Tool.CUT && moved) {
         this.world.cutTile(this.hoverX, this.hoverY);
       } else if ((this.tool === Tool.DESIGNATE || this.tool === Tool.UNDESIGNATE) && moved) {
         this.designateAtHover(this.tool);
@@ -568,6 +737,7 @@ export class DebugRenderer {
 
     const release = (e: PointerEvent): void => {
       if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
+      if (this.tool === Tool.GRAPPLE) this.world.debris.releaseGrapple();
       this.tool = Tool.NONE;
     };
     canvas.addEventListener('pointerup', release);
