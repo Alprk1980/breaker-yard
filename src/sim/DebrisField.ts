@@ -497,7 +497,8 @@ export class DebrisField {
     // A body with every tile inside a zone goes into that bin.
     for (let b = 0; b < MAX_BODIES; b++) {
       if (alive[b] === 0) continue;
-      const z = salvage.zoneContaining(bounds[b * 4] - 0.5, bounds[b * 4 + 1] - 0.5, bounds[b * 4 + 2] + 0.5, bounds[b * 4 + 3] + 0.5);
+      // Bounds are tile centres; half a tile out is the tiles' edges.
+      const z = salvage.zoneContaining(bounds, b * 4, 0.5);
       if (z >= 0) this.deliver(b, z, salvage);
     }
   }
