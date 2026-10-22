@@ -1,6 +1,7 @@
 import { CELL_COUNT, HEIGHT, TICK_DT, WIDTH } from './constants';
 import { GasCell, type Vec2 } from './GasGrid';
-import { MATERIAL_MASS } from './materials';
+import { MATERIAL_BIN, MATERIAL_MASS, MATERIAL_VALUE } from './materials';
+import { MISSORT_FACTOR } from './materialSchema';
 import type { Salvage } from './Salvage';
 import { TileFlags } from './TileFlags';
 import type { World } from './World';
@@ -60,6 +61,15 @@ const C_CORR_Y = 6;
 const C_CORR_N = 7;
 const SCRATCH_SIZE = 8;
 
+/**
+ * Where each tile is sampled for contacts, in tile units from its centre: the centre, then
+ * four points just inside its corners. Corner samples stop a tile at a wall's face rather
+ * than with its centre half a tile in.
+ */
+const SAMPLE_X = [0, -0.45, 0.45, -0.45, 0.45];
+const SAMPLE_Y = [0, -0.45, -0.45, 0.45, 0.45];
+const SAMPLES = 5;
+
 // Body-building sums (see `acc`).
 const A_MASS = 0;
 const A_MX = 1;
@@ -100,8 +110,23 @@ export class DebrisField {
   readonly bodyGas = new Float32Array(MAX_BODIES);
   /** Tile-centre bounding box per body from the last step: minX, minY, maxX, maxY. */
   readonly bounds = new Float32Array(MAX_BODIES * 4);
+  /**
+   * Outside forces for the next step, per body: fx, fy and torque (mass * tiles/s^2). Crew
+   * suit thrusters push here; `step` applies and clears them.
+   */
+  readonly force = new Float64Array(MAX_BODIES * 3);
+  /** Grid cell under each body's centre, from the last step, or -1 off the map. For integer-only callers. */
+  readonly centreCell = new Int32Array(MAX_BODIES).fill(-1);
+  /** Salvage zone that pays most for each body, chosen when it tears free, or -1. */
+  readonly bestZone = new Int8Array(MAX_BODIES).fill(-1);
+  /** World tick before which crews leave a body alone (after a haul got stuck). */
+  readonly haulBlockedUntil = new Int32Array(MAX_BODIES);
+  /** Body mass in tenths, as an integer for integer-only callers. */
+  readonly massTenths = new Int32Array(MAX_BODIES);
   count = 0;
 
+  /** Grid cell under each tile's centre, from the last step, or -1 off the map. */
+  readonly tileCell = new Int32Array(MAX_DEBRIS_TILES).fill(-1);
   /** Tile offsets from the owning body's centre of mass (x, y interleaved), unrotated. */
   readonly tileLocal = new Float32Array(MAX_DEBRIS_TILES * 2);
   readonly tileFlags = new Uint8Array(MAX_DEBRIS_TILES);
@@ -217,6 +242,12 @@ export class DebrisField {
     this.writeBody(b);
     this.tileStart[b] = start;
     this.tileCount[b] = n;
+    this.force.fill(0, b * 3, b * 3 + 3);
+    this.haulBlockedUntil[b] = 0;
+    for (let k = 0; k < n; k++) this.tileCell[start + k] = queue[k];
+    this.centreCell[b] = Math.floor(this.body[b * BODY_STRIDE + B_Y]) * W + Math.floor(this.body[b * BODY_STRIDE + B_X]);
+    this.bestZone[b] = this.payingZone(b, world.salvage);
+    this.massTenths[b] = Math.round(this.body[b * BODY_STRIDE + B_MASS] * 10);
     this.generation[b]++;
     this.alive[b] = 1;
     this.count++;
@@ -229,6 +260,29 @@ export class DebrisField {
       world.setTile(i % W, (i / W) | 0, TileFlags.VOID);
     }
     return true;
+  }
+
+  /**
+   * The salvage zone that would pay most for body `b` as it is (right-bin tiles in full,
+   * the rest at the missort rate), or -1 with no zones. Runs once, when the body forms.
+   */
+  private payingZone(b: number, salvage: Salvage): number {
+    let best = -1;
+    let bestPay = -1;
+    const end = this.tileStart[b] + this.tileCount[b];
+    for (let z = 0; z < salvage.zoneCount; z++) {
+      const bin = salvage.zoneBin[z];
+      let pay = 0;
+      for (let t = this.tileStart[b]; t < end; t++) {
+        const m = this.tileMaterial[t];
+        pay += MATERIAL_BIN[m] === bin ? MATERIAL_VALUE[m] : MATERIAL_VALUE[m] * MISSORT_FACTOR;
+      }
+      if (pay > bestPay) {
+        bestPay = pay;
+        best = z;
+      }
+    }
+    return best;
   }
 
   /** First pass over a new body's cells: total mass and its first moments. */
@@ -295,6 +349,17 @@ export class DebrisField {
     const g = this.grabBody;
     if (g >= 0 && (alive[g] === 0 || this.generation[g] !== this.grabGen)) this.grabBody = -1;
     if (this.grabBody >= 0) this.applyGrapple(dt);
+    const force = this.force;
+    for (let b = 0; b < MAX_BODIES; b++) {
+      if (alive[b] === 0) continue;
+      const o = b * BODY_STRIDE;
+      s[o + B_VX] += force[b * 3] * s[o + B_INV_MASS] * dt;
+      s[o + B_VY] += force[b * 3 + 1] * s[o + B_INV_MASS] * dt;
+      s[o + B_SPIN] += force[b * 3 + 2] * s[o + B_INV_INERTIA] * dt;
+      force[b * 3] = 0;
+      force[b * 3 + 1] = 0;
+      force[b * 3 + 2] = 0;
+    }
 
     for (let b = 0; b < MAX_BODIES; b++) {
       if (alive[b] === 0) continue;
@@ -342,7 +407,8 @@ export class DebrisField {
       }
     }
 
-    // Contacts, tile centre by tile centre, against the grid, the map edge and other bodies.
+    // Contacts, sampled at each tile's centre and inset corners, against the grid, the map
+    // edge and other bodies.
     const tiles = world.tiles;
     const sc = this.scratch;
     const bounds = this.bounds;
@@ -359,54 +425,62 @@ export class DebrisField {
       let maxY = -Infinity;
       const end = this.tileStart[b] + this.tileCount[b];
       for (let t = this.tileStart[b]; t < end; t++) {
-        const lx = local[t * 2];
-        const ly = local[t * 2 + 1];
-        const c = s[o + B_COS];
-        const sn = s[o + B_SIN];
-        const px = s[o + B_X] + c * lx - sn * ly;
-        const py = s[o + B_Y] + sn * lx + c * ly;
-        if (px < minX) minX = px;
-        if (px > maxX) maxX = px;
-        if (py < minY) minY = py;
-        if (py > maxY) maxY = py;
-        const cx = Math.floor(px);
-        const cy = Math.floor(py);
-        let other = -2;
-        if (cx < 0 || cy < 0 || cx >= W || cy >= H || (tiles[cy * W + cx] & PRESENT) !== 0) other = -1;
-        else if (occupant[cy * W + cx] !== 0 && occupant[cy * W + cx] !== b + 1) other = occupant[cy * W + cx] - 1;
-        if (other === -2) continue;
+        for (let k = 0; k < SAMPLES; k++) {
+          const lx = local[t * 2] + SAMPLE_X[k];
+          const ly = local[t * 2 + 1] + SAMPLE_Y[k];
+          const c = s[o + B_COS];
+          const sn = s[o + B_SIN];
+          const px = s[o + B_X] + c * lx - sn * ly;
+          const py = s[o + B_Y] + sn * lx + c * ly;
+          const cx = Math.floor(px);
+          const cy = Math.floor(py);
+          if (k === 0) {
+            if (px < minX) minX = px;
+            if (px > maxX) maxX = px;
+            if (py < minY) minY = py;
+            if (py > maxY) maxY = py;
+            this.tileCell[t] = cx < 0 || cy < 0 || cx >= W || cy >= H ? -1 : cy * W + cx;
+          }
+          let other = -2;
+          if (cx < 0 || cy < 0 || cx >= W || cy >= H || (tiles[cy * W + cx] & PRESENT) !== 0) other = -1;
+          else if (occupant[cy * W + cx] !== 0 && occupant[cy * W + cx] !== b + 1) other = occupant[cy * W + cx] - 1;
+          if (other === -2) continue;
 
-        // Normal: out of the cell across its nearer face, unless that face is blocked too.
-        const dx = px - (cx + 0.5);
-        const dy = py - (cy + 0.5);
-        const sx = dx >= 0 ? 1 : -1;
-        const sy = dy >= 0 ? 1 : -1;
-        const adx = dx >= 0 ? dx : -dx;
-        const ady = dy >= 0 ? dy : -dy;
-        const xFree = !this.blocked(tiles, cx + sx, cy, other);
-        const yFree = !this.blocked(tiles, cx, cy + sy, other);
-        if (xFree && (adx >= ady || !yFree)) {
-          sc[C_NX] = sx;
-          sc[C_NY] = 0;
-          sc[C_PEN] = 0.5 - adx + SLOP;
-        } else if (yFree) {
-          sc[C_NX] = 0;
-          sc[C_NY] = sy;
-          sc[C_PEN] = 0.5 - ady + SLOP;
-        } else {
-          // Buried in a corner: back out toward the body's own centre.
-          const bx = s[o + B_X] - (cx + 0.5);
-          const by = s[o + B_Y] - (cy + 0.5);
-          const bl = Math.sqrt(bx * bx + by * by) + 1e-9;
-          sc[C_NX] = bx / bl;
-          sc[C_NY] = by / bl;
-          sc[C_PEN] = 0.5;
+          // Normal: out of the cell across its nearer face, unless that face is blocked too.
+          const dx = px - (cx + 0.5);
+          const dy = py - (cy + 0.5);
+          const sx = dx >= 0 ? 1 : -1;
+          const sy = dy >= 0 ? 1 : -1;
+          const adx = dx >= 0 ? dx : -dx;
+          const ady = dy >= 0 ? dy : -dy;
+          const xFree = !this.blocked(tiles, cx + sx, cy, other);
+          const yFree = !this.blocked(tiles, cx, cy + sy, other);
+          if (xFree && (adx >= ady || !yFree)) {
+            sc[C_NX] = sx;
+            sc[C_NY] = 0;
+            sc[C_PEN] = 0.5 - adx + SLOP;
+          } else if (yFree) {
+            sc[C_NX] = 0;
+            sc[C_NY] = sy;
+            sc[C_PEN] = 0.5 - ady + SLOP;
+          } else {
+            // Buried in a corner: back out toward the body's own centre.
+            const bx = s[o + B_X] - (cx + 0.5);
+            const by = s[o + B_Y] - (cy + 0.5);
+            const bl = Math.sqrt(bx * bx + by * by) + 1e-9;
+            sc[C_NX] = bx / bl;
+            sc[C_NY] = by / bl;
+            sc[C_PEN] = 0.5;
+          }
+          sc[C_PX] = px;
+          sc[C_PY] = py;
+          this.resolveContact(b, other);
+          contacts++;
         }
-        sc[C_PX] = px;
-        sc[C_PY] = py;
-        this.resolveContact(b, other);
-        contacts++;
       }
+      const cxw = Math.floor(s[o + B_X]);
+      const cyw = Math.floor(s[o + B_Y]);
+      this.centreCell[b] = cxw < 0 || cyw < 0 || cxw >= W || cyw >= H ? -1 : cyw * W + cxw;
       bounds[b * 4] = minX;
       bounds[b * 4 + 1] = minY;
       bounds[b * 4 + 2] = maxX;
@@ -537,6 +611,7 @@ export class DebrisField {
     this.tileLocal.copyWithin(start * 2, end * 2, this.tilesUsed * 2);
     this.tileFlags.copyWithin(start, end, this.tilesUsed);
     this.tileMaterial.copyWithin(start, end, this.tilesUsed);
+    this.tileCell.copyWithin(start, end, this.tilesUsed);
     this.tilesUsed -= n;
     for (let k = 0; k < MAX_BODIES; k++) {
       if (this.alive[k] === 1 && this.tileStart[k] > start) this.tileStart[k] -= n;

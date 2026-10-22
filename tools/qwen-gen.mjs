@@ -6,6 +6,7 @@
  *
  *   npm run gen -- materials [--ask "extra brief"] [--dry]
  *   npm run gen -- ships [--count 2] [--ask "..."] [--replace id,id] [--dry]
+ *   npm run gen -- ships --repair [--dry]   (send shipped entries the check now fails back to be fixed)
  *
  * A kind is a prompt file, a data file and a validator:
  *   - `tableErrors(table)`: the reply is one JSON array checked as a whole (cross-entry balance
@@ -103,6 +104,45 @@ function entryErrors(e) {
     out.push(`${e.id}: id already used; pick a new id`);
   }
   return out;
+}
+
+// --repair: entries already shipped that the check now fails (after a rule change) go back to the
+// model one at a time with their errors; it answers the same entry with only those problems fixed.
+if (args.includes('--repair')) {
+  if (!kind.errors) throw new Error('--repair needs an entry kind');
+  const base = readFileSync(kind.prompt, 'utf8').replaceAll('{{count}}', '1').replaceAll('{{ask}}', '').replaceAll('{{existing}}', 'none');
+  const failing = shipped.filter((e) => kind.errors(e).length > 0);
+  console.log(`${failing.length} shipped entr(ies) fail the check: ${failing.map((e) => e.id).join(', ')}`);
+  const fixed = [];
+  for (const entry of failing) {
+    const messages = [{
+      role: 'user',
+      content:
+        `${base}\n\nREPAIR. This entry is already in the game but fails the check after a rule change. Answer a JSON ` +
+        `array with this one entry, keeping its id, name, description and layout; change only what the errors name.\n\n` +
+        `${JSON.stringify(entry)}\n\nErrors:\n- ${kind.errors(entry).join('\n- ')}`,
+    }];
+    let good = null;
+    for (let attempt = 1; attempt <= 3 && good === null; attempt++) {
+      console.log(`${entry.id}: attempt ${attempt}/3`);
+      const reply = await ask(messages);
+      writeFileSync(`generated/${kindName}-repair-${entry.id}-${attempt}.json`, reply);
+      const list = parse(reply);
+      const candidate = list?.find((e) => e?.id === entry.id) ?? null;
+      const problems = candidate === null ? ['answer the one entry, same id, as a JSON array'] : kind.errors(candidate);
+      console.log(`  ${problems.length} problem(s)${problems.length ? `:\n    ${problems.join('\n    ')}` : ''}`);
+      if (problems.length === 0) good = candidate;
+      else messages.push({ role: 'assistant', content: reply }, { role: 'user', content: `Fix these and answer again:\n- ${problems.join('\n- ')}` });
+    }
+    if (good !== null) fixed.push(good);
+  }
+  if (args.includes('--dry') || fixed.length === 0) console.log(`${fixed.length} repaired; nothing written`);
+  else {
+    const merged = shipped.map((s) => fixed.find((f) => f.id === s.id) ?? s);
+    writeFileSync(kind.data, `${JSON.stringify(merged, null, 2)}\n`);
+    console.log(`repaired ${fixed.length}: ${fixed.map((e) => e.id).join(', ')}; run npm test`);
+  }
+  process.exit(0);
 }
 
 const prompt = readFileSync(kind.prompt, 'utf8')

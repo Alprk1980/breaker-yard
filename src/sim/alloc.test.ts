@@ -1,13 +1,24 @@
+import { Session } from 'node:inspector/promises';
 import { getHeapSpaceStatistics } from 'node:v8';
 import { describe, expect, it } from 'vitest';
 import { HazardKind } from './HazardLog';
-import { DEMO, buildDemoHull, grappleHull, seedDemoCrew, setRoomPressure, warmUpCrew, warmUpKernels } from './scenes';
+import { PawnState } from './PawnManager';
+import { DEMO, buildDemoHull, grappleHull, looseDeckPatch, seedDemoCrew, setRoomPressure, warmUpCrew, warmUpKernels } from './scenes';
 import { Simulation } from './Simulation';
 import { TileFlags } from './TileFlags';
 import { ToolKind } from './WorkOrderQueue';
 import { World } from './World';
 
 declare const gc: (() => void) | undefined;
+
+interface SamplingNode {
+  callFrame: { functionName: string; url: string };
+  selfSize: number;
+  children: SamplingNode[];
+}
+interface SamplingProfile {
+  head: SamplingNode;
+}
 
 function newSpaceUsed(): number {
   for (const s of getHeapSpaceStatistics()) if (s.space_name === 'new_space') return s.space_used_size;
@@ -110,7 +121,64 @@ describe('tick loop allocations', () => {
     expect(refusing / TICKS).toBeLessThan(MAX_BYTES_PER_TICK);
     expect(fleeing / TICKS).toBeLessThan(MAX_BYTES_PER_TICK);
   });
+
+  it(
+    "the crew's hauling code allocates nothing per tick: approach, tug, delivery, flight home",
+    { timeout: 300_000 },
+    async () => {
+      warmUpKernels(new World());
+      warmUpCrew(new Simulation());
+      haulScenario(new Simulation(), false);
+      haulScenario(new Simulation(), false);
+      const sim = new Simulation();
+      // Sample every allocation during the measured run and charge each to the function that
+      // made it. Only setup (clearing and spawning the crew) and the once-per-tow steps
+      // (boarding, letting go, logging) may allocate in PawnManager; the per-tick approach,
+      // tug and return code must not.
+      const session = new Session();
+      session.connect();
+      await session.post('HeapProfiler.startSampling', { samplingInterval: 16 });
+      const { bytes, towed } = haulScenario(sim, true);
+      const { profile } = (await session.post('HeapProfiler.stopSampling')) as { profile: SamplingProfile };
+      session.disconnect();
+      let pawnBytes = 0;
+      const ONE_OFF = new Set(['clear', 'spawn', 'board', 'endTow', 'abandonHaul', 'releaseHaul', 'log']);
+      const walk = (n: SamplingNode): void => {
+        if (n.callFrame.url.includes('PawnManager') && !ONE_OFF.has(n.callFrame.functionName)) pawnBytes += n.selfSize;
+        for (const c of n.children) walk(c);
+      };
+      walk(profile.head);
+      // The total also holds JIT churn in the gas and debris kernels: V8 re-tiers `flow`, `diffuse`
+      // and `DebrisField.step` every time a lone chunk comes and goes (tens of bytes per tick, not
+      // from this code). Logged so it stays visible.
+      console.log(`new-space bytes over ${TICKS} sim ticks: hauling=${bytes} (PawnManager per-tick: ${pawnBytes})`);
+      expect(towed).toBe(true);
+      expect(sim.world.salvage.credits).toBeGreaterThan(0);
+      expect(pawnBytes).toBe(0);
+    },
+  );
 });
+
+/**
+ * Four pawns in a vented demo hull with a loose deck patch by an opened stern: one tows it
+ * to the furnace and flies home. Measures the 2000 ticks after the chunk is set loose
+ * (approach, boarding, tug, delivery, return, idle) when `measure` is set.
+ */
+function haulScenario(sim: Simulation, measure: boolean): { bytes: number; towed: boolean } {
+  const { world, pawns } = sim;
+  buildDemoHull(world);
+  setRoomPressure(world, 0);
+  sim.resetCrew();
+  for (let k = 0; k < 4; k++) pawns.spawn(74, 60 + k * 2);
+  for (let t = 0; t < 40; t++) sim.tick();
+  looseDeckPatch(world);
+  let towed = false;
+  let bytes = 0;
+  if (measure) bytes = bytesAllocatedDuring(sim, TICKS);
+  else for (let t = 0; t < TICKS; t++) sim.tick();
+  for (let p = 0; p < 4; p++) towed ||= pawns.state[p] === PawnState.IDLE && world.salvage.credits > 0;
+  return { bytes, towed };
+}
 
 /**
  * Demo crew cutting interior bulkheads, then refusing frame cuts in a 5 bar room, then

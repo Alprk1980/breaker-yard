@@ -137,6 +137,28 @@ export function towIntoGantry(world: World, ticks: number): void {
   world.debris.releaseGrapple();
 }
 
+/**
+ * Opens the demo hull's stern and lifts a 3x3 deck patch beside the hole loose, with a
+ * one-tile gap to the deck around it: a light chunk a hauler can reach and tow out at once.
+ * Returns the chunk's body. Used by warm-up and tests.
+ */
+export function looseDeckPatch(world: World): number {
+  for (let y = 60; y <= 68; y++) {
+    world.cutTile(DEMO.engine.x, y);
+    world.cutTile(DEMO.engine.x, y);
+    world.cutTile(DEMO.engine.x - 1, y);
+  }
+  const cells: number[] = [];
+  for (let y = 63; y <= 65; y++) for (let x = 80; x <= 82; x++) cells.push(world.index(x, y));
+  const b = world.debris.liftCells(world, cells);
+  for (let x = 79; x <= 83; x++) {
+    world.cutTile(x, 62);
+    world.cutTile(x, 66);
+  }
+  for (let y = 62; y <= 66; y++) world.cutTile(79, y);
+  return b;
+}
+
 /** Spawns the demo crew inside the main room. */
 export function seedDemoCrew(sim: Simulation): void {
   for (const [x, y] of DEMO.crew) sim.pawns.spawn(x, y);
@@ -144,8 +166,9 @@ export function seedDemoCrew(sim: Simulation): void {
 
 /**
  * Like `warmUpKernels`, for the crew: a full 32-pawn crew runs through navigating,
- * cutting, refused high-pressure cuts, a breach, drag, fleeing and riding a torn-off
- * hull on a throwaway simulation, several times over, then it is cleared. Pawn code paths are individually
+ * cutting, refused high-pressure cuts, a breach, drag, fleeing, riding a torn-off hull and
+ * hauling a loose chunk to a bin on a throwaway simulation, several times over, then it is
+ * cleared. Pawn code paths are individually
  * cold (one pawn flees now and then), so V8 only optimises them with a big crew; until
  * then they run in the interpreter, which boxes every double.
  */
@@ -179,6 +202,13 @@ export function warmUpCrew(sim: Simulation, cycles = 3, ticksPerPhase = 300): vo
     for (let t = 0; t < 30; t++) sim.tick();
     grappleHull(world);
     for (let t = 0; t < ticksPerPhase; t++) sim.tick();
+    // A crew hauls a loose deck patch out of a vented hull: approach, board, tug, deliver, fly home.
+    buildDemoHull(world);
+    setRoomPressure(world, 0);
+    sim.resetCrew();
+    for (let k = 0; k < 4; k++) pawns.spawn(74, 60 + k * 2);
+    looseDeckPatch(world);
+    for (let t = 0; t < ticksPerPhase * 2; t++) sim.tick();
   }
   world.clear();
   sim.resetCrew();

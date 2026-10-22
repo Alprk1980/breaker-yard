@@ -7,7 +7,7 @@ import { B_MASS, BODY_STRIDE } from './sim/DebrisField';
 import { DemoDirector } from './sim/DemoDirector';
 import { HAZARD_NAMES } from './sim/HazardLog';
 import { BIN_NAMES, MATERIAL_BIN, MATERIAL_COUNT, MATERIAL_NAMES } from './sim/materials';
-import { PAWN_STATE_NAMES } from './sim/PawnManager';
+import { JOB_KINDS, JOB_NAMES, JobKind, PAWN_STATE_NAMES, PawnState } from './sim/PawnManager';
 import { DEMO, buildDemoHull, seedDemoCrew, warmUpCrew, warmUpKernels } from './sim/scenes';
 import { type ShipBlueprint, buildShip, seedShipCrew } from './sim/ships';
 import { Simulation } from './sim/Simulation';
@@ -52,6 +52,8 @@ function takeContract(i: number): void {
 }
 
 let paused = false;
+/** Full control list in the HUD, toggled with `?`. */
+let showHelp = false;
 // Doubles kept in a typed array: writing a double to a module-level `let` boxes it every frame.
 const LAST_FRAME = 0;
 const LAST_TICK_MS = 1;
@@ -110,6 +112,12 @@ window.addEventListener('keydown', (e) => {
     demo.tick();
     sim.tick();
     contract.tick(world);
+  } else if ((e.code === 'KeyC' || e.code === 'KeyH') && !e.repeat) {
+    // Job priorities for the selected pawn: 1, 2, 3, 4, off.
+    const p = renderer.selectedPawn;
+    if (p >= 0 && sim.pawns.alive[p] === 1) sim.pawns.cycleJobPriority(p, e.code === 'KeyC' ? JobKind.CUT : JobKind.HAUL);
+  } else if (e.code === 'Slash' && !e.repeat) {
+    showHelp = !showHelp;
   }
 });
 
@@ -162,12 +170,26 @@ setInterval(() => {
     renderer.bannerSub = `N: take a salvage contract (${fleet.length} ships)   M: demo`;
   }
   const P = sim.pawns;
-  let crew = `${job}\ncrew ${P.count}  orders ${sim.orders.count}`;
+  let cutting = 0;
+  let hauling = 0;
+  for (let p = 0; p < P.capacity; p++) {
+    if (P.alive[p] === 0) continue;
+    const st = P.state[p];
+    if (st === PawnState.NAVIGATING || st === PawnState.PRE_CUT || st === PawnState.DISASSEMBLING) cutting++;
+    if (st === PawnState.APPROACHING || st === PawnState.TUGGING || st === PawnState.RETURNING) hauling++;
+  }
+  let crew = `${job}\ncrew ${P.count} (${cutting} cutting, ${hauling} hauling)  orders ${sim.orders.count}`;
   const sel = renderer.selectedPawn;
   if (sel >= 0 && P.alive[sel]) {
+    const prio: string[] = [];
+    for (let k = 0; k < JOB_KINDS; k++) {
+      const v = P.jobPriority[sel * JOB_KINDS + k];
+      prio.push(`${JOB_NAMES[k]} ${v === 0 ? 'off' : v}`);
+    }
     crew +=
-      `\npawn ${sel}: ${PAWN_STATE_NAMES[P.state[sel]]}  boots ${P.magBoot[sel] ? 'locked' : 'free'}` +
-      `  work ${P.progress[sel].toFixed(0)}%  v (${P.vel[sel * 2].toFixed(2)}, ${P.vel[sel * 2 + 1].toFixed(2)})`;
+      `\npawn ${sel}: ${PAWN_STATE_NAMES[P.state[sel]]}  jobs ${prio.join(', ')} (C / H to change)` +
+      `\n  boots ${P.magBoot[sel] ? 'locked' : 'free'}  work ${P.progress[sel].toFixed(0)}%` +
+      `  v (${P.vel[sel * 2].toFixed(2)}, ${P.vel[sel * 2 + 1].toFixed(2)})`;
   }
   const log = sim.hazards;
   for (let n = Math.max(0, log.count - 4); n < log.count; n++) {
@@ -182,7 +204,11 @@ setInterval(() => {
     salvage +
     hover +
     crew +
-    `\n\nLMB select pawn / grapple debris (drag to tow) / cut   Shift+LMB designate wall   RMB inject 10 bar   MMB anchor\n` +
-    `P spawn pawn   Esc deselect   Space+drag or WASD pan   wheel zoom   F fit\n` +
-    `G gas   T stress   Enter pause   . step   R reset   M demo ${demo.active ? 'on' : 'off'}   0-${demo.sections.length} demo sections   N contract`;
+    (showHelp
+      ? `\n\nLMB select pawn / grapple debris (drag to tow) / cut   Shift+LMB designate wall\n` +
+        `Ctrl+drag salvage a block (crew cut it free and haul it)   RMB inject 10 bar   MMB anchor\n` +
+        `P spawn pawn   C / H pawn's cut / haul priority   Esc deselect\n` +
+        `Space+drag or WASD pan   wheel zoom   F fit   G gas   T stress\n` +
+        `Enter pause   . step   R reset   N contract   M demo ${demo.active ? 'on' : 'off'}   0-${demo.sections.length} demo sections   ? hide help`
+      : `\n\n? help   N contract   M demo   Ctrl+drag salvage`);
 }, 250);

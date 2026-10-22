@@ -1,9 +1,10 @@
-import { B_COS, B_SIN, B_SPIN, B_VX, B_VY, B_X, B_Y, BODY_STRIDE } from './DebrisField';
+import { HAUL_LANE_X } from './constants';
+import { B_COS, B_MASS, B_SIN, B_SPIN, B_VX, B_VY, B_X, B_Y, BODY_STRIDE, MAX_BODIES } from './DebrisField';
 import { GasCell, type Vec2 } from './GasGrid';
 import { HazardKind, type HazardLog } from './HazardLog';
 import { COST_IMPASSABLE, type PathGrid } from './PathGrid';
-import { isSolid } from './TileFlags';
-import { ToolKind, type WorkOrderQueue } from './WorkOrderQueue';
+import { TileFlags, isSolid } from './TileFlags';
+import { OrderKind, ToolKind, type WorkOrderQueue } from './WorkOrderQueue';
 import type { World } from './World';
 
 export const MAX_PAWNS = 32;
@@ -16,9 +17,62 @@ export const PawnState = {
   PRE_CUT: 2,
   DISASSEMBLING: 3,
   FLEEING: 4,
+  /** Walking to a deck tile next to a loose chunk, to climb aboard and tow it. */
+  APPROACHING: 5,
+  /** Aboard a chunk, pushing it to a bin with suit thrusters. */
+  TUGGING: 6,
+  /** Flying back to the ship after a tow. */
+  RETURNING: 7,
 } as const;
 
-export const PAWN_STATE_NAMES: readonly string[] = ['IDLE', 'NAVIGATING', 'PRE_CUT', 'DISASSEMBLING', 'FLEEING'];
+export const PAWN_STATE_NAMES: readonly string[] = [
+  'IDLE',
+  'NAVIGATING',
+  'PRE_CUT',
+  'DISASSEMBLING',
+  'FLEEING',
+  'APPROACHING',
+  'TUGGING',
+  'RETURNING',
+];
+
+/** Kinds of work a pawn can be given a priority for. */
+export const JobKind = {
+  /** Work orders: cutting walls open and severing salvage. */
+  CUT: 0,
+  /** Towing loose chunks to the bin that pays most for them. */
+  HAUL: 1,
+} as const;
+export const JOB_KINDS = 2;
+export const JOB_NAMES: readonly string[] = ['cut', 'haul'];
+/** Job priorities run 1 (done first) to 4 (done last); 0 means never. */
+export const JOB_PRIORITY_LOWEST = 4;
+/** New pawns cut first and haul when there is nothing to cut. */
+export const DEFAULT_JOB_PRIORITY: readonly number[] = [1, 2];
+
+/** A hauler's thruster force limit, mass * tiles/s^2 (the player's grapple has 150). */
+export const TUG_FORCE = 60;
+/** Tow spring per unit mass toward the next waypoint (1/s^2) and damping on the load's velocity (1/s). */
+export const TUG_STIFFNESS = 2;
+export const TUG_DAMPING = 3;
+/** Chunks heavier than this (in girder tiles) are too much for one suit to tow. */
+export const HAUL_MAX_MASS = 150;
+/** How far from a chunk's nearest tile a hauler can climb aboard, in tiles. */
+export const BOARD_RANGE = 2.5;
+/**
+ * How many tiles out from a chunk a hauler looks for deck to stand on, and the squared
+ * tile offset allowed, which keeps the stand within `BOARD_RANGE` of the chunk (2-and-1
+ * offsets are in, 2-and-2 corners are not).
+ */
+const STAND_REACH = 2;
+const STAND_REACH_SQ = 5;
+/** A tow moves on to its next waypoint within this distance, in tiles. */
+export const HAUL_WAYPOINT_RADIUS = 2.5;
+/** A tow that has not gained half a tile on its waypoint in this many checks is stuck. */
+export const STUCK_CHECK_TICKS = 40;
+export const STUCK_LIMIT = 4;
+/** After a stuck tow, crews leave that chunk alone this long. */
+export const HAUL_BLOCK_TICKS = 600;
 
 /** Per-pawn warning bits, shown by the renderer. */
 export const PawnWarning = {
@@ -91,6 +145,16 @@ const NAVIGATING = PawnState.NAVIGATING;
 const PRE_CUT = PawnState.PRE_CUT;
 const DISASSEMBLING = PawnState.DISASSEMBLING;
 const FLEEING = PawnState.FLEEING;
+const APPROACHING = PawnState.APPROACHING;
+const TUGGING = PawnState.TUGGING;
+const RETURNING = PawnState.RETURNING;
+const JOB_CUT = JobKind.CUT;
+const JOB_HAUL = JobKind.HAUL;
+const SEVER = OrderKind.SEVER;
+const PRESENT = TileFlags.FLOOR | TileFlags.BULKHEAD | TileFlags.GIRDER;
+/** `rideRole` values. */
+const ROLE_PASSENGER = 0;
+const ROLE_TUG = 1;
 const W_PRESSURE = PawnWarning.PRESSURE;
 const W_VENT = PawnWarning.VENT;
 const W_TOXIC = PawnWarning.TOXIC;
@@ -102,6 +166,7 @@ const H_DECOMPRESSION = HazardKind.DECOMPRESSION;
 const H_ADRIFT = HazardKind.ADRIFT;
 const H_UNREACHABLE = HazardKind.UNREACHABLE;
 const H_CARRIED_OFF = HazardKind.CARRIED_OFF;
+const H_HAUL_ABANDONED = HazardKind.HAUL_ABANDONED;
 const OPEN = GasCell.OPEN;
 const WALL = GasCell.WALL;
 const HEAVY_CUTTER = ToolKind.HEAVY_CUTTER;
@@ -161,6 +226,25 @@ export class PawnManager {
   readonly ride = new Int16Array(MAX_PAWNS).fill(-1);
   readonly rideGen = new Uint16Array(MAX_PAWNS);
   readonly rideLocal = new Float32Array(MAX_PAWNS * 2);
+  /** Passenger (carried off) or tug (hauling the chunk it rides). */
+  readonly rideRole = new Uint8Array(MAX_PAWNS);
+  /** Job priority per pawn and `JobKind` (`p * JOB_KINDS + kind`): 1 first .. 4 last, 0 never. */
+  readonly jobPriority = new Uint8Array(MAX_PAWNS * JOB_KINDS);
+  /** Chunk the pawn is hauling (approaching or towing), or -1, with that body's generation. */
+  readonly haulBody = new Int16Array(MAX_PAWNS).fill(-1);
+  readonly haulGen = new Uint16Array(MAX_PAWNS);
+  /** Tow route: three waypoints (x, y), the last inside the bin; and the leg being flown. */
+  readonly route = new Float32Array(MAX_PAWNS * 6);
+  readonly routeLeg = new Uint8Array(MAX_PAWNS);
+  /** Deck tile a hauler left from, to fly back to; and whether it has reached the lane yet. */
+  readonly home = new Int32Array(MAX_PAWNS).fill(-1);
+  readonly returnLeg = new Uint8Array(MAX_PAWNS);
+  /** Stuck detection for tows: closest approach to the waypoint, ticks since, failed checks. */
+  readonly stuckBest = new Float32Array(MAX_PAWNS);
+  readonly stuckTicks = new Uint8Array(MAX_PAWNS);
+  readonly stuckCount = new Uint8Array(MAX_PAWNS);
+  /** Pawn hauling each debris body, or -1. */
+  readonly bodyHauler = new Int8Array(MAX_BODIES).fill(-1);
   count = 0;
 
   private readonly scalars = new Float64Array(4);
@@ -201,6 +285,10 @@ export class PawnManager {
     this.pathLen[p] = 0;
     this.pathStep[p] = 0;
     this.ride[p] = -1;
+    this.rideRole[p] = ROLE_PASSENGER;
+    this.haulBody[p] = -1;
+    this.home[p] = -1;
+    for (let k = 0; k < JOB_KINDS; k++) this.jobPriority[p * JOB_KINDS + k] = DEFAULT_JOB_PRIORITY[k];
     this.count++;
     return p;
   }
@@ -208,6 +296,7 @@ export class PawnManager {
   despawn(p: number): void {
     if (this.alive[p] === 0) return;
     this.dropOrder(p, 0);
+    this.releaseHaul(p);
     this.alive[p] = 0;
     this.count--;
   }
@@ -215,7 +304,20 @@ export class PawnManager {
   clear(): void {
     this.alive.fill(0);
     this.orderSlot.fill(-1);
+    this.bodyHauler.fill(-1);
     this.count = 0;
+  }
+
+  /** Sets a pawn's priority for a kind of job: 1 first .. 4 last, 0 never. */
+  setJobPriority(p: number, kind: number, priority: number): void {
+    this.jobPriority[p * JOB_KINDS + kind] = priority < 0 ? 0 : priority > JOB_PRIORITY_LOWEST ? JOB_PRIORITY_LOWEST : priority;
+  }
+
+  /** Steps a pawn's priority for a job through 1, 2, 3, 4, off. Returns the new value. */
+  cycleJobPriority(p: number, kind: number): number {
+    const next = (this.jobPriority[p * JOB_KINDS + kind] + 1) % (JOB_PRIORITY_LOWEST + 1);
+    this.jobPriority[p * JOB_KINDS + kind] = next;
+    return next;
   }
 
   /** Nearest live pawn within `radius` tiles of (x, y), or -1. */
@@ -303,10 +405,36 @@ export class PawnManager {
         vel[p * 2 + 1] = s[o + B_VY] + s[o + B_SPIN] * rx;
         this.magBoot[p] = 1;
         this.warnings[p] = 0;
+        if (this.rideRole[p] === ROLE_TUG) {
+          // Suit thrusters: a force-limited spring toward the next waypoint, damped on the load's speed.
+          const leg = this.routeLeg[p];
+          const dx = this.route[p * 6 + leg * 2] - s[o + B_X];
+          const dy = this.route[p * 6 + leg * 2 + 1] - s[o + B_Y];
+          const d = Math.sqrt(dx * dx + dy * dy);
+          const m = s[o + B_MASS];
+          const fx = m * (TUG_STIFFNESS * dx - TUG_DAMPING * s[o + B_VX]);
+          const fy = m * (TUG_STIFFNESS * dy - TUG_DAMPING * s[o + B_VY]);
+          const f = Math.sqrt(fx * fx + fy * fy);
+          const k = f > TUG_FORCE ? TUG_FORCE / f : 1;
+          debris.force[ride * 3] += fx * k;
+          debris.force[ride * 3 + 1] += fy * k;
+          this.heading[p * 2] = d > 1e-4 ? dx / d : this.heading[p * 2];
+          this.heading[p * 2 + 1] = d > 1e-4 ? dy / d : this.heading[p * 2 + 1];
+          const next = d < HAUL_WAYPOINT_RADIUS && leg < 2;
+          this.routeLeg[p] = next ? leg + 1 : leg;
+          // Stuck: no half-tile gain on the waypoint for STUCK_LIMIT checks in a row.
+          const gained = d < this.stuckBest[p] - 0.5;
+          this.stuckBest[p] = next ? 1e9 : gained ? d : this.stuckBest[p];
+          const due = !gained && !next && this.stuckTicks[p] + 1 >= STUCK_CHECK_TICKS;
+          this.stuckTicks[p] = gained || next || due ? 0 : this.stuckTicks[p] + 1;
+          this.stuckCount[p] = gained || next ? 0 : due ? this.stuckCount[p] + 1 : this.stuckCount[p];
+          if (this.stuckCount[p] >= STUCK_LIMIT) this.abandonHaul(p);
+        }
         return;
       }
       // The wreck went into a bin: float free at the speed it was carrying us.
       this.ride[p] = -1;
+      if (this.rideRole[p] === ROLE_TUG) this.endTow(p);
     }
 
     // --- Physics: decompression drag against magboots, suit thrusters, clamping ---
@@ -362,7 +490,7 @@ export class PawnManager {
 
     const vt = impMag > FLEE_IMPULSE ? this.ventTicks[p] + 1 : 0;
     this.ventTicks[p] = vt > 255 ? 255 : vt;
-    if (this.state[p] !== FLEEING && (vt >= FLEE_CONFIRM_TICKS || !onFloor)) {
+    if (this.state[p] !== FLEEING && this.state[p] !== RETURNING && (vt >= FLEE_CONFIRM_TICKS || !onFloor)) {
       sc[S_IMPULSE] = impMag;
       this.startFleeing(p, onFloor ? H_DECOMPRESSION : H_ADRIFT, tx, ty);
     }
@@ -384,11 +512,17 @@ export class PawnManager {
       case FLEEING:
         this.tickFleeing(p, tx, ty, impMag > FLEE_IMPULSE, impMag < CALM_IMPULSE);
         break;
+      case APPROACHING:
+        this.tickApproaching(p);
+        break;
+      case RETURNING:
+        this.tickReturning(p, tx, ty);
+        break;
     }
 
     // --- Motion and work for the state just decided ---
     const state = this.state[p];
-    if ((state === NAVIGATING || state === FLEEING) && this.clamp[p] === 0) {
+    if ((state === NAVIGATING || state === FLEEING || state === APPROACHING) && this.clamp[p] === 0) {
       // Walk along the path; several waypoints can be passed in one tick.
       let budget = (state === FLEEING ? FLEE_SPEED : WALK_SPEED) * dt;
       const base = p * MAX_PATH;
@@ -438,31 +572,233 @@ export class PawnManager {
     }
   }
 
+  /** Tries each job kind in priority order (1 first) and takes the first that has work. */
   private tickIdle(p: number, tx: number, ty: number): void {
+    const base = p * JOB_KINDS;
+    for (let level = 1; level <= JOB_PRIORITY_LOWEST; level++) {
+      if (this.jobPriority[base + JOB_CUT] === level && this.tryCut(p, tx, ty)) return;
+      if (this.jobPriority[base + JOB_HAUL] === level && this.tryHaul(p, tx, ty)) return;
+    }
+  }
+
+  /** True when an order's tile still has work left: a wall to open, or anything left to sever. */
+  private orderLive(slot: number, idx: number): boolean {
+    const flags = this.world.tiles[idx];
+    return this.orders.kind[slot] === SEVER ? (flags & PRESENT) !== 0 : isSolid(flags);
+  }
+
+  /** Claims the best work order and heads for it. Returns false when there is none. */
+  private tryCut(p: number, tx: number, ty: number): boolean {
     const orders = this.orders;
     const slot = orders.claimNextOrder(tx, ty, p, this.toolMask[p]);
-    if (slot < 0) return;
+    if (slot < 0) return false;
     const w = this.world.width;
     const idx = orders.cell[slot];
     const ox = idx % w;
     const oy = (idx / w) | 0;
-    if (!isSolid(this.world.tiles[idx])) {
+    if (!this.orderLive(slot, idx)) {
       // Already cut by hand; nothing left to do.
       orders.complete(slot);
-      return;
+      return true;
     }
     this.orderSlot[p] = slot;
     this.target[p * 2] = ox;
     this.target[p * 2 + 1] = oy;
     this.progress[p] = orders.progress[slot];
     this.warnings[p] &= ~W_PRESSURE;
-    if (!this.planPath(p, tx, ty, ox, oy, true)) {
+    if (!this.planPath(p, tx, ty, ox, oy, true, this.orders.kind[this.orderSlot[p]] === SEVER)) {
       this.hazards.log(H_UNREACHABLE, p, ox, oy, this.world.tickCount, 0);
       this.dropOrder(p, UNREACHABLE_SUSPEND_TICKS);
-      return;
+      return true;
     }
     this.state[p] = NAVIGATING;
     this.timer[p] = REPATH_TICKS;
+    return true;
+  }
+
+  /**
+   * Looks for a loose chunk to tow: free (no other hauler, not on the player's grapple, not
+   * blocked after a stuck tow), light enough, with a bin to go to, and with a walkable deck
+   * tile next to one of its tiles. Takes the one whose standing tile is nearest and heads
+   * there. Integer-only, and heavy chunks are skipped before their tiles are scanned, so it
+   * is cheap enough to run every tick an idle pawn has hauling as its next job.
+   */
+  private tryHaul(p: number, tx: number, ty: number): boolean {
+    const world = this.world;
+    const debris = world.debris;
+    if (debris.count === 0) return false;
+    const w = world.width;
+    const h = world.height;
+    const cells = world.gas.cells;
+    const tick = world.tickCount;
+    let bestBody = -1;
+    let bestStand = -1;
+    let bestD = 0x7fffffff;
+    for (let b = 0; b < MAX_BODIES; b++) {
+      if (debris.alive[b] === 0 || this.bodyHauler[b] >= 0 || debris.grabBody === b) continue;
+      if (debris.bestZone[b] < 0 || debris.haulBlockedUntil[b] > tick || debris.massTenths[b] > HAUL_MAX_MASS * 10) continue;
+      const end = debris.tileStart[b] + debris.tileCount[b];
+      for (let t = debris.tileStart[b]; t < end; t++) {
+        const cell = debris.tileCell[t];
+        if (cell < 0) continue;
+        const cx = cell % w;
+        const cy = (cell / w) | 0;
+        // Two tiles out: severing leaves a one-tile gap of vacuum around the chunk.
+        for (let dy = -STAND_REACH; dy <= STAND_REACH; dy++) {
+          for (let dx = -STAND_REACH; dx <= STAND_REACH; dx++) {
+            const x = cx + dx;
+            const y = cy + dy;
+            if (dx * dx + dy * dy > STAND_REACH_SQ) continue;
+            if (x < 0 || y < 0 || x >= w || y >= h || cells[y * w + x] !== OPEN) continue;
+            if (this.paths.getCost(x, y) === COST_IMPASSABLE) continue;
+            const d = (x > tx ? x - tx : tx - x) + (y > ty ? y - ty : ty - y);
+            if (d < bestD) {
+              bestD = d;
+              bestBody = b;
+              bestStand = y * w + x;
+            }
+          }
+        }
+      }
+    }
+    if (bestBody < 0) return false;
+    const sx = bestStand % w;
+    const sy = (bestStand / w) | 0;
+    if (!this.planPath(p, tx, ty, sx, sy, false)) {
+      debris.haulBlockedUntil[bestBody] = tick + UNREACHABLE_SUSPEND_TICKS;
+      return false;
+    }
+    this.bodyHauler[bestBody] = p;
+    this.haulBody[p] = bestBody;
+    this.haulGen[p] = debris.generation[bestBody];
+    this.target[p * 2] = sx;
+    this.target[p * 2 + 1] = sy;
+    this.state[p] = APPROACHING;
+    return true;
+  }
+
+  /** Walking to the chunk: give up if it is gone; climb aboard on arrival. */
+  private tickApproaching(p: number): void {
+    const b = this.haulBody[p];
+    const debris = this.world.debris;
+    if (b < 0 || debris.alive[b] === 0 || debris.generation[b] !== this.haulGen[p]) {
+      this.releaseHaul(p);
+      this.state[p] = IDLE;
+      this.pathLen[p] = 0;
+      return;
+    }
+    if (this.pathStep[p] >= this.pathLen[p]) this.board(p);
+  }
+
+  /**
+   * Climbs aboard the hauled chunk at its tile nearest the pawn and sets the tow route: out
+   * to the haul lane, along it to the bin's row, into the bin. Gives up if the chunk has
+   * drifted out of reach. Runs once per tow.
+   */
+  private board(p: number): void {
+    const world = this.world;
+    const debris = world.debris;
+    const b = this.haulBody[p];
+    const s = debris.body;
+    const o = b * BODY_STRIDE;
+    const px = this.pos[p * 2];
+    const py = this.pos[p * 2 + 1];
+    let best = -1;
+    let bestD2 = BOARD_RANGE * BOARD_RANGE;
+    const end = debris.tileStart[b] + debris.tileCount[b];
+    for (let t = debris.tileStart[b]; t < end; t++) {
+      const lx = debris.tileLocal[t * 2];
+      const ly = debris.tileLocal[t * 2 + 1];
+      const dx = s[o + B_X] + s[o + B_COS] * lx - s[o + B_SIN] * ly - px;
+      const dy = s[o + B_Y] + s[o + B_SIN] * lx + s[o + B_COS] * ly - py;
+      const d2 = dx * dx + dy * dy;
+      if (d2 <= bestD2) {
+        bestD2 = d2;
+        best = t;
+      }
+    }
+    if (best < 0) {
+      this.releaseHaul(p);
+      debris.haulBlockedUntil[b] = world.tickCount + UNREACHABLE_SUSPEND_TICKS;
+      this.state[p] = IDLE;
+      return;
+    }
+    this.home[p] = Math.floor(py) * world.width + Math.floor(px);
+    this.returnLeg[p] = 0;
+    this.ride[p] = b;
+    this.rideGen[p] = debris.generation[b];
+    this.rideRole[p] = ROLE_TUG;
+    this.rideLocal[p * 2] = debris.tileLocal[best * 2];
+    this.rideLocal[p * 2 + 1] = debris.tileLocal[best * 2 + 1];
+    const zone = debris.bestZone[b];
+    const rect = world.salvage.zoneRect;
+    const zx = (rect[zone * 4] + rect[zone * 4 + 2]) * 0.5;
+    const zy = (rect[zone * 4 + 1] + rect[zone * 4 + 3]) * 0.5;
+    const by = s[o + B_Y];
+    const r = p * 6;
+    this.route[r] = HAUL_LANE_X;
+    this.route[r + 1] = by;
+    this.route[r + 2] = HAUL_LANE_X;
+    this.route[r + 3] = zy > by ? zy - 2 : zy + 2;
+    this.route[r + 4] = zx;
+    this.route[r + 5] = zy;
+    this.routeLeg[p] = 0;
+    this.stuckBest[p] = 1e9;
+    this.stuckTicks[p] = 0;
+    this.stuckCount[p] = 0;
+    this.pathLen[p] = 0;
+    this.state[p] = TUGGING;
+  }
+
+  /** The towed chunk is gone (delivered, or taken away): let go and head home. */
+  private endTow(p: number): void {
+    this.releaseHaul(p);
+    this.rideRole[p] = ROLE_PASSENGER;
+    this.state[p] = RETURNING;
+    this.returnLeg[p] = 0;
+    this.clamp[p] = 0;
+  }
+
+  /** The tow is stuck: let go, leave the chunk alone for a while, and head home. */
+  private abandonHaul(p: number): void {
+    const b = this.ride[p];
+    const world = this.world;
+    if (b >= 0) world.debris.haulBlockedUntil[b] = world.tickCount + HAUL_BLOCK_TICKS;
+    this.hazards.log(H_HAUL_ABANDONED, p, Math.floor(this.pos[p * 2]), Math.floor(this.pos[p * 2 + 1]), world.tickCount, 0);
+    this.ride[p] = -1;
+    this.endTow(p);
+  }
+
+  /** Drops any claim on a chunk. */
+  private releaseHaul(p: number): void {
+    const b = this.haulBody[p];
+    if (b >= 0 && this.bodyHauler[b] === p) this.bodyHauler[b] = -1;
+    this.haulBody[p] = -1;
+  }
+
+  /**
+   * Flying home after a tow: thrusters aim at the haul lane level with the home tile, then at
+   * the home tile itself, so the pawn comes back in through open space rather than across
+   * the hull. Lands (back to IDLE) on the first deck tile it reaches.
+   */
+  private tickReturning(p: number, tx: number, ty: number): void {
+    const w = this.world.width;
+    if (this.world.gas.cells[ty * w + tx] === OPEN) {
+      this.state[p] = IDLE;
+      this.anchor[p] = -1;
+      this.home[p] = -1;
+      return;
+    }
+    const home = this.home[p];
+    if (home < 0) {
+      this.anchor[p] = this.nearestFloor(tx, ty, ANCHOR_SEARCH_RADIUS);
+      return;
+    }
+    const hy = (home / w) | 0;
+    const dx = tx > HAUL_LANE_X ? tx - HAUL_LANE_X : HAUL_LANE_X - tx;
+    const dy = ty > hy ? ty - hy : hy - ty;
+    if (this.returnLeg[p] === 0 && dx <= 1 && dy <= 1) this.returnLeg[p] = 1;
+    this.anchor[p] = this.returnLeg[p] === 0 ? hy * w + HAUL_LANE_X : home;
   }
 
   private tickNavigating(p: number, tx: number, ty: number): void {
@@ -480,7 +816,7 @@ export class PawnManager {
     // Costs move with the gas, so routes are refreshed on a fixed cadence.
     const ox = this.target[p * 2];
     const oy = this.target[p * 2 + 1];
-    if (!this.planPath(p, tx, ty, ox, oy, true)) {
+    if (!this.planPath(p, tx, ty, ox, oy, true, this.orders.kind[this.orderSlot[p]] === SEVER)) {
       this.hazards.log(H_UNREACHABLE, p, ox, oy, this.world.tickCount, 0);
       this.dropOrder(p, UNREACHABLE_SUSPEND_TICKS);
       return;
@@ -493,7 +829,7 @@ export class PawnManager {
     if (!this.holdsLiveOrder(p)) return;
     const ox = this.target[p * 2];
     const oy = this.target[p * 2 + 1];
-    if (!this.adjacentTo(tx, ty, ox, oy)) {
+    if (!this.inReach(p, tx, ty, ox, oy)) {
       this.resumeNavigation(p);
       return;
     }
@@ -518,7 +854,7 @@ export class PawnManager {
     const world = this.world;
     const ox = this.target[p * 2];
     const oy = this.target[p * 2 + 1];
-    if (!this.adjacentTo(tx, ty, ox, oy)) {
+    if (!this.inReach(p, tx, ty, ox, oy)) {
       this.resumeNavigation(p);
       return;
     }
@@ -533,6 +869,15 @@ export class PawnManager {
   /** The wall is through: remove the tile and its structural node, and close the order. */
   private finishCut(p: number, ox: number, oy: number): void {
     this.world.cutTile(ox, oy);
+    const slot = this.orderSlot[p];
+    if (this.orders.kind[slot] === SEVER && (this.world.tiles[oy * this.world.width + ox] & PRESENT) !== 0) {
+      // Severing: the wall is deck now; scan again and keep cutting until it is gone.
+      this.progress[p] = 0;
+      this.orders.progress[slot] = 0;
+      this.state[p] = PRE_CUT;
+      this.timer[p] = PRE_CUT_TICKS;
+      return;
+    }
     this.orders.complete(this.orderSlot[p]);
     this.orderSlot[p] = -1;
     this.progress[p] = 0;
@@ -581,6 +926,7 @@ export class PawnManager {
   private startFleeing(p: number, kind: number, tx: number, ty: number): void {
     this.hazards.log(kind, p, tx, ty, this.world.tickCount, this.scalars[S_IMPULSE]);
     this.dropOrder(p, FLEE_SUSPEND_TICKS);
+    this.releaseHaul(p);
     this.state[p] = FLEEING;
     this.clamp[p] = 0;
     this.anchor[p] = -1;
@@ -674,8 +1020,8 @@ export class PawnManager {
     return -1;
   }
 
-  private planPath(p: number, sx: number, sy: number, gx: number, gy: number, adjacent: boolean): boolean {
-    const len = this.paths.findPath(sx, sy, gx, gy, adjacent, this.path, p * MAX_PATH, MAX_PATH);
+  private planPath(p: number, sx: number, sy: number, gx: number, gy: number, adjacent: boolean, diagonal = false): boolean {
+    const len = this.paths.findPath(sx, sy, gx, gy, adjacent, this.path, p * MAX_PATH, MAX_PATH, diagonal);
     this.pathStep[p] = 0;
     if (len < 0) {
       this.pathLen[p] = 0;
@@ -734,7 +1080,7 @@ export class PawnManager {
       this.pathLen[p] = 0;
       return false;
     }
-    if (!isSolid(this.world.tiles[idx])) {
+    if (!this.orderLive(slot, idx)) {
       this.orders.complete(slot);
       this.orderSlot[p] = -1;
       this.state[p] = IDLE;
@@ -762,9 +1108,15 @@ export class PawnManager {
     this.pathStep[p] = 0;
   }
 
-  private adjacentTo(x: number, y: number, ox: number, oy: number): boolean {
+  /**
+   * Whether a pawn on (x, y) can work the tile (ox, oy): 4-adjacent for walls, and across a
+   * corner too when severing, since severed tiles can end up with no 4-neighbour left to
+   * stand on.
+   */
+  private inReach(p: number, x: number, y: number, ox: number, oy: number): boolean {
     const dx = x > ox ? x - ox : ox - x;
     const dy = y > oy ? y - oy : oy - y;
+    if (this.orders.kind[this.orderSlot[p]] === SEVER) return dx <= 1 && dy <= 1 && dx + dy > 0;
     return dx + dy === 1;
   }
 

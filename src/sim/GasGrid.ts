@@ -99,10 +99,30 @@ export class GasGrid {
   private keep = MAX_STABLE_FLOW_KEEP;
   /** Flow substeps per tick. 0 turns the flow pass off, leaving pure diffusion. */
   flowSubsteps = 8;
+  /**
+   * Running totals of gas and toxin drained into vacuum. Kept in a typed array, not as
+   * number fields: a field that starts as integer 0 and turns fractional changes its
+   * representation, which keeps invalidating the optimised kernels that update it.
+   */
+  private readonly vented = new Float64Array(2);
+
   /** Running total of gas drained into vacuum cells since construction or `clear()`. */
-  vacuumAbsorbed = 0;
+  get vacuumAbsorbed(): number {
+    return this.vented[0];
+  }
+
+  set vacuumAbsorbed(value: number) {
+    this.vented[0] = value;
+  }
+
   /** Running total of toxin drained into vacuum. */
-  toxinVented = 0;
+  get toxinVented(): number {
+    return this.vented[1];
+  }
+
+  set toxinVented(value: number) {
+    this.vented[1] = value;
+  }
 
   private readonly scratch: Vec2 = { x: 0, y: 0 };
   /** Result slot for `measurePressureDelta`: a double returned from a call that V8 does not inline gets boxed. */
@@ -346,8 +366,8 @@ export class GasGrid {
       }
     }
 
-    this.vacuumAbsorbed += drained;
-    this.toxinVented += toxDrained;
+    this.vented[0] += drained;
+    this.vented[1] += toxDrained;
     this.current = nxt;
     this.next = cur;
     this.toxin = toxNxt;
@@ -363,6 +383,10 @@ export class GasGrid {
     const toxNxt = this.toxinNext;
     const cells = this.cells;
     const k = this.k;
+    // Cell types read once here: a property load inside a branch that warm-up never took has
+    // no type feedback, and deoptimises the whole kernel the first time it runs.
+    const OPEN = GasCell.OPEN;
+    const VACUUM = GasCell.VACUUM;
     let drained = 0;
     let toxDrained = 0;
 
@@ -370,7 +394,7 @@ export class GasGrid {
       const row = y * w;
       for (let x = 0; x < w; x++) {
         const i = row + x;
-        if (cells[i] !== GasCell.OPEN) {
+        if (cells[i] !== OPEN) {
           nxt[i] = 0;
           toxNxt[i] = 0;
           continue;
@@ -383,31 +407,31 @@ export class GasGrid {
 
         if (x > 0) {
           const c = cells[i - 1];
-          if (c === GasCell.OPEN) {
+          if (c === OPEN) {
             lap += cur[i - 1] - p;
             toxLap += tox[i - 1] - q;
-          } else if (c === GasCell.VACUUM) vacuumSides++;
+          } else if (c === VACUUM) vacuumSides++;
         }
         if (x < w - 1) {
           const c = cells[i + 1];
-          if (c === GasCell.OPEN) {
+          if (c === OPEN) {
             lap += cur[i + 1] - p;
             toxLap += tox[i + 1] - q;
-          } else if (c === GasCell.VACUUM) vacuumSides++;
+          } else if (c === VACUUM) vacuumSides++;
         }
         if (y > 0) {
           const c = cells[i - w];
-          if (c === GasCell.OPEN) {
+          if (c === OPEN) {
             lap += cur[i - w] - p;
             toxLap += tox[i - w] - q;
-          } else if (c === GasCell.VACUUM) vacuumSides++;
+          } else if (c === VACUUM) vacuumSides++;
         }
         if (y < h - 1) {
           const c = cells[i + w];
-          if (c === GasCell.OPEN) {
+          if (c === OPEN) {
             lap += cur[i + w] - p;
             toxLap += tox[i + w] - q;
-          } else if (c === GasCell.VACUUM) vacuumSides++;
+          } else if (c === VACUUM) vacuumSides++;
         }
 
         // Vacuum sits at 0 bar, so each vacuum side contributes (0 - p).
@@ -420,8 +444,8 @@ export class GasGrid {
       }
     }
 
-    this.vacuumAbsorbed += drained;
-    this.toxinVented += toxDrained;
+    this.vented[0] += drained;
+    this.vented[1] += toxDrained;
     this.current = nxt;
     this.next = cur;
     this.toxin = toxNxt;

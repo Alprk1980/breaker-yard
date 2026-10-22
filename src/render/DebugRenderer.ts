@@ -5,7 +5,7 @@ import { MATERIAL_COLORS, MATERIAL_COUNT } from '../sim/materials';
 import { MAX_PATH, PAWN_STATE_NAMES, PAWN_WARNING_BITS, PawnState, PawnWarning } from '../sim/PawnManager';
 import type { Simulation } from '../sim/Simulation';
 import { TileFlags, isLoadBearing, isSolid } from '../sim/TileFlags';
-import { PRIORITY_DEFAULT, ToolKind } from '../sim/WorkOrderQueue';
+import { OrderKind, PRIORITY_DEFAULT, ToolKind } from '../sim/WorkOrderQueue';
 import type { World } from '../sim/World';
 import { RAMP_MAX_BAR, RAMP_SIZE, buildGasRamp, buildStressPalette, packRGBA } from './colorRamp';
 
@@ -26,6 +26,9 @@ const COLOR_FLOATING_TILE = 'rgba(148, 163, 184, 0.35)';
 const COLOR_HOVER = 'rgba(255, 255, 255, 0.85)';
 
 const COLOR_ORDER = 'rgba(251, 146, 60, 0.9)';
+/** Sever orders (salvage designations), and the drag rectangle that places them. */
+const COLOR_ORDER_SEVER = 'rgba(56, 189, 248, 0.9)';
+const COLOR_SALVAGE_DRAG = 'rgba(56, 189, 248, 0.8)';
 const COLOR_ORDER_CLAIMED = 'rgba(250, 204, 21, 0.95)';
 const COLOR_ORDER_SUSPENDED = 'rgba(239, 68, 68, 0.95)';
 const COLOR_ORDER_PROGRESS = 'rgba(250, 204, 21, 0.55)';
@@ -52,7 +55,18 @@ const COLOR_BANNER_BG = 'rgba(7, 10, 18, 0.78)';
 const COLOR_DEMO_CURSOR = '#fb923c';
 const PAWN_FONT = '11px ui-monospace, SFMono-Regular, Menlo, monospace';
 /** Fill per PawnState. */
-const PAWN_COLORS: readonly string[] = ['#94a3b8', '#38bdf8', '#facc15', '#fb923c', '#f43f5e'];
+const PAWN_COLORS: readonly string[] = [
+  '#94a3b8', // idle
+  '#38bdf8', // navigating
+  '#facc15', // pre-cut
+  '#fb923c', // disassembling
+  '#f43f5e', // fleeing
+  '#a78bfa', // approaching a chunk
+  '#34d399', // tugging
+  '#22d3ee', // returning
+];
+/** Smallest pawn radius in pixels, so the crew stays visible zoomed out. */
+const MIN_PAWN_RADIUS = 6;
 /** Zoom (pixels per tile) at which every pawn gets a status label, not just the selected one. */
 const LABEL_ZOOM = 10;
 
@@ -70,6 +84,7 @@ const Tool = {
   DESIGNATE: 4,
   UNDESIGNATE: 5,
   GRAPPLE: 6,
+  SALVAGE: 7,
 } as const;
 
 /** Label per warning bitmask, built once so drawing a label never builds a string. */
@@ -94,6 +109,7 @@ function buildWarningLabels(): string[] {
  *   Left click            select the pawn under the cursor; on debris, grapple it (drag to tow);
  *                         elsewhere, cut tile (drag to keep cutting)
  *   Shift + left click    designate a wall for deconstruction (drag for more; again to cancel)
+ *   Ctrl + left drag      salvage: the crew severs the ring around the rectangle and hauls it away
  *   Right click / hold    inject 10 bar gas
  *   Middle click          toggle dock anchor on a girder
  *   P                     spawn a pawn at the cursor
@@ -148,6 +164,8 @@ export class DebugRenderer {
   private readonly bucketStart = new Int32Array(BUCKET_TOTAL);
 
   private dpr = 1;
+  /** Salvage drag corners in tiles: x0, y0, x1, y1. */
+  private readonly salvage = new Int32Array(4);
   private tool: number = Tool.NONE;
   private panKeyHeld = false;
   private lastPointerX = 0;
@@ -240,6 +258,7 @@ export class DebugRenderer {
 
     if (this.showStress) this.drawStress();
     this.drawZones();
+    if (this.tool === Tool.SALVAGE) this.drawSalvageDrag();
 
     if (this.hoverX >= 0) {
       ctx.strokeStyle = COLOR_HOVER;
@@ -297,6 +316,20 @@ export class DebugRenderer {
   }
 
   /** Salvage bins: tinted rectangles in tile space. Zone corners are whole tiles. */
+  /** The salvage drag: the block to cut free, and the ring the crew will sever around it. */
+  private drawSalvageDrag(): void {
+    const ctx = this.ctx;
+    const sv = this.salvage;
+    const x0 = sv[0] < sv[2] ? sv[0] : sv[2];
+    const y0 = sv[1] < sv[3] ? sv[1] : sv[3];
+    const w = (sv[0] < sv[2] ? sv[2] - sv[0] : sv[0] - sv[2]) + 1;
+    const h = (sv[1] < sv[3] ? sv[3] - sv[1] : sv[1] - sv[3]) + 1;
+    ctx.strokeStyle = COLOR_SALVAGE_DRAG;
+    ctx.lineWidth = 0.2;
+    ctx.strokeRect(x0, y0, w, h);
+    ctx.strokeRect(x0 - 1, y0 - 1, w + 2, h + 2);
+  }
+
   private drawZones(): void {
     const ctx = this.ctx;
     const S = this.world.salvage;
@@ -413,7 +446,13 @@ export class DebugRenderer {
       const sx = ox + (idx % w) * z;
       const sy = oy + ((idx / w) | 0) * z;
       ctx.strokeStyle =
-        q.suspended[s] > 0 ? COLOR_ORDER_SUSPENDED : q.claimedBy[s] >= 0 ? COLOR_ORDER_CLAIMED : COLOR_ORDER;
+        q.suspended[s] > 0
+          ? COLOR_ORDER_SUSPENDED
+          : q.claimedBy[s] >= 0
+            ? COLOR_ORDER_CLAIMED
+            : q.kind[s] === OrderKind.SEVER
+              ? COLOR_ORDER_SEVER
+              : COLOR_ORDER;
       ctx.strokeRect(sx + inset, sy + inset, z - inset * 2, z - inset * 2);
       const filled = ((q.progress[s] * z) / 100) | 0;
       if (filled > 0) {
@@ -458,7 +497,8 @@ export class DebugRenderer {
     const z = this.zoom;
     const ox = this.originX();
     const oy = this.originY();
-    const r = z > 8 ? ((z * 0.45) | 0) : 4;
+    const rz = (z * 0.45) | 0;
+    const r = rz > MIN_PAWN_RADIUS ? rz : MIN_PAWN_RADIUS;
     const nose = r * 2;
     ctx.font = PAWN_FONT;
     ctx.textBaseline = 'middle';
@@ -700,6 +740,10 @@ export class DebugRenderer {
       this.screenToTile(e.clientX, e.clientY);
       if (e.button === 0 && this.panKeyHeld) {
         this.tool = Tool.PAN;
+      } else if (e.button === 0 && (e.ctrlKey || e.metaKey) && this.hoverX >= 0) {
+        this.tool = Tool.SALVAGE;
+        this.salvage[0] = this.salvage[2] = this.hoverX;
+        this.salvage[1] = this.salvage[3] = this.hoverY;
       } else if (e.button === 0 && e.shiftKey) {
         this.tool = this.designateAtHover(Tool.NONE);
       } else if (e.button === 0) {
@@ -734,7 +778,10 @@ export class DebugRenderer {
       const prevY = this.hoverY;
       this.screenToTile(e.clientX, e.clientY);
       const moved = this.hoverX >= 0 && (this.hoverX !== prevX || this.hoverY !== prevY);
-      if (this.tool === Tool.GRAPPLE) {
+      if (this.tool === Tool.SALVAGE && this.hoverX >= 0) {
+        this.salvage[2] = this.hoverX;
+        this.salvage[3] = this.hoverY;
+      } else if (this.tool === Tool.GRAPPLE) {
         this.world.debris.setGrappleTarget(this.hoverFx, this.hoverFy);
       } else if (this.tool === Tool.CUT && moved) {
         this.world.cutTile(this.hoverX, this.hoverY);
@@ -746,6 +793,10 @@ export class DebugRenderer {
     const release = (e: PointerEvent): void => {
       if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
       if (this.tool === Tool.GRAPPLE) this.world.debris.releaseGrapple();
+      if (this.tool === Tool.SALVAGE) {
+        const sv = this.salvage;
+        this.sim.designateSalvage(sv[0], sv[1], sv[2], sv[3]);
+      }
       this.tool = Tool.NONE;
     };
     canvas.addEventListener('pointerup', release);
