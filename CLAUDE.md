@@ -34,3 +34,6 @@ Core inspiration: *Hardspace: Shipbreaker* meets *RimWorld* priority automation.
 - Lead with implementation code; do not stub empty methods.
 - Write unit tests for the stress relaxation solver and diffusion conservation of mass.
 - When modifying code, keep changes minimal and surgical.
+- Keep the demo current: every feature that lands gets a demo section in `src/sim/DemoDirector.ts` (or a beat in an
+  existing one) and a test in `DemoDirector.test.ts` that the section reaches its outcome when played on its own.
+  Sections must stay standalone (`?demo=<id>`, keys 1-n), so each one's `setup` builds the state it needs.

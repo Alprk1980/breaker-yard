@@ -28,7 +28,10 @@ let shipIndex = -1;
 // Attract mode: the game plays a salvage run on its own until the player takes over, then
 // docks the next contract ship to show what is on offer.
 const demo = new DemoDirector(sim, fleet);
-demo.restart();
+// `?demo=<section id>` opens straight into one section (looping), `?demo=off` skips the demo.
+const demoParam = new URLSearchParams(location.search).get('demo');
+if (demoParam !== null && demo.sectionIndex(demoParam) >= 0) demo.playSection(demo.sectionIndex(demoParam));
+else if (demoParam !== 'off') demo.restart();
 const renderer = new DebugRenderer(canvas, sim);
 renderer.demo = demo;
 // Any click on the canvas hands control to the player. Capture phase, so it runs before
@@ -82,6 +85,14 @@ window.addEventListener('keydown', (e) => {
       shipIndex = -1;
       demo.restart();
     }
+  } else if (/^Digit[0-9]$/.test(e.code) && !e.repeat) {
+    // 0 plays the whole demo, 1-n loop one section on its own.
+    const n = Number(e.code.slice(5));
+    if (n > demo.sections.length) return;
+    contract.reset();
+    shipIndex = -1;
+    if (n === 0) demo.restart();
+    else demo.playSection(n - 1);
   } else if (e.code === 'KeyN' && !e.repeat && fleet.length > 0) {
     // Take the ship the demo is showing, call an open contract done, or move on to the next ship.
     if (demo.showcaseIndex >= 0) takeContract(demo.showcaseIndex);
@@ -173,5 +184,5 @@ setInterval(() => {
     crew +
     `\n\nLMB select pawn / grapple debris (drag to tow) / cut   Shift+LMB designate wall   RMB inject 10 bar   MMB anchor\n` +
     `P spawn pawn   Esc deselect   Space+drag or WASD pan   wheel zoom   F fit\n` +
-    `G gas   T stress   Enter pause   . step   R reset   M demo ${demo.active ? 'on' : 'off'}   N contract`;
+    `G gas   T stress   Enter pause   . step   R reset   M demo ${demo.active ? 'on' : 'off'}   0-${demo.sections.length} demo sections   N contract`;
 }, 250);

@@ -40,7 +40,7 @@ npm run gen -- ships --count 2     # generate more ships (validated, repaired, m
 | `src/sim/materials.ts` | Per-tile `Material` and `Bin` ids, and the material table as typed arrays |
 | `src/sim/materialSchema.ts` | Validator and balance check for `src/data/materials.json` (self-contained, so the generator can import it) |
 | `src/data/materials.json` | The material table: value, mass, bin and colour per material. Generated, not hand-edited |
-| `src/sim/DemoDirector.ts` | Attract mode: a scripted salvage run (crew cut, engine to the barge, deck to the furnace, hull torn free) played through the player's controls, looping |
+| `src/sim/DemoDirector.ts` | Attract mode in sections (crew, engine, deck, tear-off, contract), played through the player's controls. Each section has its own setup, so it can be looped on its own: keys 1-5, or `?demo=<id>` in the URL (`?demo=off` skips the demo) |
 | `tools/qwen-gen.mjs`, `prompts/*.txt` | Generate, validate and repair loop against the local model; attempts land in `generated/` |
 | `tools/register-ts.mjs`, `tools/ts-hooks.mjs` | Let plain Node load the game's TypeScript validators (extensionless imports, JSON modules) |
 
@@ -72,6 +72,7 @@ npm run gen -- ships --count 2     # generate more ships (validated, repaired, m
 | Enter, `.` | Pause, single-step while paused |
 | R | Reset the demo hull |
 | M | Start or stop the self-playing demo (on at load; any click on the canvas also takes over) |
+| 0 / 1-5 | Play the whole demo / loop one demo section on its own (crew, engine, deck, tear-off, contract) |
 | N | Take the next salvage contract, or call the open one done |
 | R (in a contract) | Restart the contract on a fresh copy of the ship |
 
