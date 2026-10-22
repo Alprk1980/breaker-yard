@@ -50,6 +50,16 @@ export const FIRE_SMOTHER = 0.85;
 /** Intensity below which a fire is out. */
 export const FIRE_OUT = 0.01;
 
+/**
+ * A fresh scratch vector. Its fields start fractional on purpose: a `{ x: 0, y: 0 }` literal
+ * starts with integer fields, and the first fraction written into it changes the object's
+ * shape, throwing away optimised code and feedback built against the old one. Callers always
+ * overwrite both fields before reading them.
+ */
+export function newVec2(): Vec2 {
+  return { x: 0.5, y: 0.5 };
+}
+
 export interface Vec2 {
   x: number;
   y: number;
@@ -153,7 +163,7 @@ export class GasGrid {
     return this.vented[3];
   }
 
-  private readonly scratch: Vec2 = { x: 0, y: 0 };
+  private readonly scratch: Vec2 = newVec2();
   /** Result slot for `measurePressureDelta`: a double returned from a call that V8 does not inline gets boxed. */
   private readonly delta = new Float64Array(1);
 

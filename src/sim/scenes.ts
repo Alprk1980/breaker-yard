@@ -2,6 +2,7 @@ import { B_X, B_Y, BODY_STRIDE } from './DebrisField';
 import { Bin, Material } from './materials';
 import type { Simulation } from './Simulation';
 import { TileFlags } from './TileFlags';
+import { JobKind } from './PawnManager';
 import { ToolKind } from './WorkOrderQueue';
 import type { World } from './World';
 
@@ -252,6 +253,21 @@ export function warmUpCrew(sim: Simulation, cycles = 3, ticksPerPhase = 300): vo
     // A crewman blown out unconscious, flown out to and carried back aboard.
     strandedCrewman(sim);
     for (let t = 0; t < ticksPerPhase * 3; t++) sim.tick();
+    // Every life event once: one pawn blacks out in air and comes round, one suffocates and
+    // dies. A first death or wake in a later run would otherwise throw away the optimised
+    // pawn tick (the handlers inline into it with no type feedback).
+    buildDemoHull(world);
+    sim.resetCrew();
+    const waker = pawns.spawn(60, 60);
+    const dier = pawns.spawn(70, 70);
+    for (let p = 0; p < pawns.capacity; p++) if (pawns.alive[p] === 1) pawns.setJobPriority(p, JobKind.RESCUE, 0);
+    pawns.health[waker] = -5;
+    pawns.health[dier] = -45;
+    pawns.oxygen[dier] = 0;
+    for (let y = DEMO.hull.y0 + 1; y < DEMO.hull.y1; y++) {
+      for (let x = DEMO.hull.x0 + 15; x < DEMO.hull.x1; x++) world.gas.setPressure(x, y, 0);
+    }
+    for (let t = 0; t < ticksPerPhase; t++) sim.tick();
     // A cabin fire the crew runs from, and burns in.
     buildDemoHull(world);
     sim.resetCrew();

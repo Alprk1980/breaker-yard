@@ -1,6 +1,6 @@
 import { HAUL_LANE_X, HEIGHT, WIDTH } from './constants';
 import { B_COS, B_MASS, B_SIN, B_SPIN, B_VX, B_VY, B_X, B_Y, BODY_STRIDE, MAX_BODIES } from './DebrisField';
-import { GasCell, type Vec2 } from './GasGrid';
+import { GasCell, type Vec2, newVec2 } from './GasGrid';
 import { HazardKind, type HazardLog } from './HazardLog';
 import { BREATHABLE_BAR, BREATHABLE_TOXIN_BAR, COST_IMPASSABLE, type PathGrid } from './PathGrid';
 import { TileFlags, isSolid } from './TileFlags';
@@ -351,8 +351,8 @@ export class PawnManager {
   count = 0;
 
   private readonly scalars = new Float64Array(4);
-  private readonly impulse: Vec2 = { x: 0, y: 0 };
-  private readonly probe: Vec2 = { x: 0, y: 0 };
+  private readonly impulse: Vec2 = newVec2();
+  private readonly probe: Vec2 = newVec2();
 
   constructor(
     private readonly world: World,

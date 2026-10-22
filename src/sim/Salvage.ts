@@ -15,11 +15,39 @@ export class Salvage {
   readonly zoneRect = new Float32Array(MAX_ZONES * 4);
   zoneCount = 0;
 
-  credits = 0;
-  /** Credits lost to wrong-bin deliveries (value delivered minus value paid). */
-  missortLoss = 0;
-  /** Value of tiles removed by the torch. */
-  destroyedValue = 0;
+  /**
+   * Credits paid, credits lost to wrong-bin deliveries (value delivered minus value paid), and
+   * value of tiles removed by the torch. Kept in a typed array behind accessors, not as plain
+   * number fields: a field that starts as integer 0 and later holds fractions changes its
+   * representation, which changes the object's shape and throws away optimised code built
+   * against the old one.
+   */
+  private readonly ledger = new Float64Array(3);
+
+  get credits(): number {
+    return this.ledger[0];
+  }
+
+  set credits(value: number) {
+    this.ledger[0] = value;
+  }
+
+  get missortLoss(): number {
+    return this.ledger[1];
+  }
+
+  set missortLoss(value: number) {
+    this.ledger[1] = value;
+  }
+
+  get destroyedValue(): number {
+    return this.ledger[2];
+  }
+
+  set destroyedValue(value: number) {
+    this.ledger[2] = value;
+  }
+
   deliveredTiles = 0;
   missortedTiles = 0;
   /** Tiles delivered per material. */
@@ -62,8 +90,8 @@ export class Salvage {
     const value = MATERIAL_VALUE[material];
     const right = MATERIAL_BIN[material] === this.zoneBin[zone];
     const paid = right ? value : value * MISSORT_FACTOR;
-    this.credits += paid;
-    this.missortLoss += value - paid;
+    this.ledger[0] += paid;
+    this.ledger[1] += value - paid;
     this.deliveredTiles++;
     this.deliveredByMaterial[material]++;
     if (!right) this.missortedTiles++;
@@ -71,7 +99,7 @@ export class Salvage {
 
   /** Records a tile the torch removed. */
   destroyTile(material: number): void {
-    this.destroyedValue += MATERIAL_VALUE[material];
+    this.ledger[2] += MATERIAL_VALUE[material];
   }
 
   /** Clears the ledger and the zones. */
@@ -81,9 +109,7 @@ export class Salvage {
   }
 
   resetLedger(): void {
-    this.credits = 0;
-    this.missortLoss = 0;
-    this.destroyedValue = 0;
+    this.ledger.fill(0);
     this.deliveredTiles = 0;
     this.missortedTiles = 0;
     this.deliveredByMaterial.fill(0);

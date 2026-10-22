@@ -10,6 +10,14 @@ import { TileFlags, isLoadBearing, isSolid, isVoid } from './TileFlags';
 const LEAK_RATE_BAR = 0.05;
 const DEFAULT_GIRDER_MASS = 1;
 const PRESENT = TileFlags.FLOOR | TileFlags.BULKHEAD | TileFlags.GIRDER;
+/*
+ * Enum values used in the hot loops, as plain module constants: `TileFlags.FUEL` in a loop is
+ * a property load with its own type-feedback slot on every pass (see PawnManager).
+ */
+const HAZARD_LEAK = TileFlags.HAZARD_LEAK;
+const FUEL = TileFlags.FUEL;
+const OPEN = GasCell.OPEN;
+const DT = TICK_DT;
 
 /** Tank heat gained per second per unit of fire intensity in each neighbouring cell; a tank blows at 1. */
 export const TANK_HEAT_RATE = 0.25;
@@ -205,6 +213,7 @@ export class World {
    */
   private heatFromFire(): void {
     const gas = this.gas;
+    if (gas.burningCount === 0) return;
     const list = gas.burningList;
     const fire = gas.fire;
     const tiles = this.tiles;
@@ -215,7 +224,7 @@ export class World {
     const cap = L.edgeCapacity;
     const floor = L.breakThreshold * FIRE_MIN_CAPACITY;
     const w = this.width;
-    const dt = TICK_DT;
+    const dt = DT;
     for (let k = 0; k < gas.burningCount; k++) {
       const i = list[k];
       const f = fire[i];
@@ -223,7 +232,7 @@ export class World {
       for (let d = 0; d < 4; d++) {
         const j = d === 0 ? (x > 0 ? i - 1 : -1) : d === 1 ? (x < w - 1 ? i + 1 : -1) : d === 2 ? i - w : i + w;
         if (j < 0 || j >= CELL_COUNT) continue;
-        if ((tiles[j] & TileFlags.FUEL) !== 0 && heat[j] < 1) {
+        if ((tiles[j] & FUEL) !== 0 && heat[j] < 1) {
           heat[j] += f * TANK_HEAT_RATE * dt;
           if (heat[j] >= 1) this.fuses[this.fuseCount++] = j;
         }
@@ -258,14 +267,16 @@ export class World {
     const cur = gas.current;
     const tox = gas.toxin;
     for (let i = 0; i < CELL_COUNT; i++) {
-      if ((tiles[i] & TileFlags.HAZARD_LEAK) !== 0 && cells[i] === GasCell.OPEN) {
+      if ((tiles[i] & HAZARD_LEAK) !== 0 && cells[i] === OPEN) {
         cur[i] += LEAK_RATE_BAR;
         tox[i] += LEAK_RATE_BAR;
       }
     }
     this.gas.step();
-    this.gas.fireStep(TICK_DT);
-    if (this.gas.burningCount > 0) this.heatFromFire();
+    this.gas.fireStep(DT);
+    // Called every tick (it returns at once when nothing burns): a call made only while
+    // something burns would be a property load with no type feedback until the first fire.
+    this.heatFromFire();
     const lattice = this.lattice;
     lattice.step();
     // Anything that lost its last path to an anchor tears free: after a snap or cut (the
