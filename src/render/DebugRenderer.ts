@@ -50,7 +50,6 @@ const BANNER_FONT = '16px ui-monospace, SFMono-Regular, Menlo, monospace';
 const COLOR_BANNER = '#f8fafc';
 const COLOR_BANNER_BG = 'rgba(7, 10, 18, 0.78)';
 const COLOR_DEMO_CURSOR = '#fb923c';
-const DEMO_HINT = 'DEMO  -  click or press M to take over';
 const PAWN_FONT = '11px ui-monospace, SFMono-Regular, Menlo, monospace';
 /** Fill per PawnState. */
 const PAWN_COLORS: readonly string[] = ['#94a3b8', '#38bdf8', '#facc15', '#fb923c', '#f43f5e'];
@@ -282,7 +281,7 @@ export class DebugRenderer {
       ctx.stroke();
       ctx.strokeRect(sx - r, sy - r, r * 2, r * 2);
     }
-    this.drawBanner(demo.label, DEMO_HINT);
+    this.drawBanner(demo.label, demo.hint);
   }
 
   private drawBanner(title: string, sub: string): void {

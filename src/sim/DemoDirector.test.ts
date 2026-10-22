@@ -3,8 +3,10 @@ import { DemoDirector } from './DemoDirector';
 import demoBlueprint from './fixtures/demoBlueprint.json';
 import { HazardKind } from './HazardLog';
 import { MATERIAL_VALUE, Material } from './materials';
+import { DEMO } from './scenes';
 import type { ShipBlueprint } from './ships';
 import { Simulation } from './Simulation';
+import { TileFlags, isSolid } from './TileFlags';
 
 describe('demo director', () => {
   it('plays a full salvage run and loops', { timeout: 120_000 }, () => {
@@ -21,7 +23,7 @@ describe('demo director', () => {
       demo.tick();
       sim.tick();
       seen.add(demo.label);
-      if (demo.label.startsWith('Up next: Showcased Hull')) showcased ||= demo.showcaseIndex === 0 && sim.pawns.count === 3;
+      if (demo.label.includes('Up next: Showcased Hull')) showcased ||= demo.showcaseIndex === 0 && sim.pawns.count === 3;
       if (demo.label.includes('tears free')) {
         tore ||= sim.world.debris.tilesUsed > 900;
         ridden ||= sim.hazards.countOf(HazardKind.CARRIED_OFF) > 0;
@@ -51,5 +53,55 @@ describe('demo director', () => {
     expect(demo.active).toBe(false);
     expect(demo.label).toBe('');
     expect(sim.world.debris.grabBody).toBe(-1);
+  });
+});
+
+describe('demo sections', () => {
+  const fleet = [{ ...(demoBlueprint as ShipBlueprint), id: 'showcased', name: 'Showcased Hull' }];
+  const lockX = DEMO.hull.x0 + 7;
+  /** What each section must have achieved by the time it loops, when played on its own. */
+  const outcomes: Record<string, (sim: Simulation, demo: DemoDirector) => boolean> = {
+    crew: (sim) => {
+      for (let y = 56; y <= 62; y++) if (isSolid(sim.world.getTile(lockX, y))) return false;
+      return true;
+    },
+    engine: (sim) => sim.world.salvage.credits >= 13 * MATERIAL_VALUE[Material.ENGINE_PART],
+    deck: (sim) => sim.world.salvage.credits >= 45 * MATERIAL_VALUE[Material.DECK_PLATE],
+    tearoff: (sim) => sim.world.debris.tilesUsed > 900 && sim.hazards.countOf(HazardKind.CARRIED_OFF) === 3,
+    contract: (sim, demo) => demo.showcaseIndex === 0 && sim.pawns.count === 3,
+  };
+
+  it('has an outcome check for every section', () => {
+    const demo = new DemoDirector(new Simulation(), fleet);
+    expect(demo.sections.map((s) => s.id).sort()).toEqual(Object.keys(outcomes).sort());
+  });
+
+  for (const id of Object.keys(outcomes)) {
+    it(`plays the ${id} section on its own, reaches its outcome, and loops it`, { timeout: 120_000 }, () => {
+      const sim = new Simulation();
+      const demo = new DemoDirector(sim, fleet);
+      const i = demo.sectionIndex(id);
+      demo.playSection(i);
+      expect(demo.label).toContain(demo.sections[i].title);
+      let reached = false;
+      for (let t = 0; t < 20 * 120 && demo.loops === 0; t++) {
+        demo.tick();
+        sim.tick();
+        reached ||= demo.loops === 0 && outcomes[id](sim, demo);
+      }
+      expect(reached).toBe(true);
+      expect(demo.loops).toBe(1);
+      expect(demo.soloSection).toBe(i);
+      expect(demo.active).toBe(true);
+    });
+  }
+
+  it('starts the deck section with the engine already gone', () => {
+    const sim = new Simulation();
+    const demo = new DemoDirector(sim, fleet);
+    demo.playSection(demo.sectionIndex('deck'));
+    expect(sim.world.getTile(DEMO.engine.x, 64)).toBe(TileFlags.VOID);
+    expect(sim.world.debris.count).toBe(0);
+    expect(sim.world.salvage.credits).toBe(0);
   });
 });
