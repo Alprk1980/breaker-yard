@@ -124,6 +124,9 @@ export class DebugRenderer {
   selectedPawn = -1;
   /** Attract-mode script, whose cursor and caption are drawn while it runs. */
   demo: DemoDirector | null = null;
+  /** Two-line banner across the top (contract status), drawn when the demo is not running. */
+  bannerTitle = '';
+  bannerSub = '';
 
   private readonly world: World;
   private readonly warningLabels = buildWarningLabels();
@@ -254,6 +257,7 @@ export class DebugRenderer {
     if (this.selectedPawn >= 0) this.drawRoute(this.selectedPawn);
     this.drawPawns();
     if (this.demo !== null && this.demo.active) this.drawDemo(this.demo);
+    else if (this.bannerTitle !== '') this.drawBanner(this.bannerTitle, this.bannerSub);
   }
 
   /** The demo's torch or grapple cursor, and its caption across the top. */
@@ -278,14 +282,19 @@ export class DebugRenderer {
       ctx.stroke();
       ctx.strokeRect(sx - r, sy - r, r * 2, r * 2);
     }
+    this.drawBanner(demo.label, DEMO_HINT);
+  }
+
+  private drawBanner(title: string, sub: string): void {
+    const ctx = this.ctx;
     ctx.font = BANNER_FONT;
     ctx.textBaseline = 'top';
     ctx.fillStyle = COLOR_BANNER_BG;
-    ctx.fillRect(12, 12, 640, 52);
+    ctx.fillRect(12, 12, 760, 52);
     ctx.fillStyle = COLOR_BANNER;
-    ctx.fillText(demo.label, 22, 20);
+    ctx.fillText(title, 22, 20);
     ctx.fillStyle = COLOR_DEMO_CURSOR;
-    ctx.fillText(DEMO_HINT, 22, 42);
+    ctx.fillText(sub, 22, 42);
   }
 
   /** Salvage bins: tinted rectangles in tile space. Zone corners are whole tiles. */

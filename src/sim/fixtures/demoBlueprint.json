@@ -1,0 +1,22 @@
+{
+  "id": "demo-hull",
+  "name": "Demo Hull",
+  "description": "The yard's training hull: one pressurised room behind a sealed airlock, engine block bolted to the stern.",
+  "width": 37,
+  "height": 29,
+  "arms": [4, 24],
+  "bulkheads": [[7, 1, 7, 27]],
+  "girders": [],
+  "doors": [],
+  "engine": [36, 8, 36, 20],
+  "consoles": [[22, 1, 6, 1]],
+  "atmosphere": [],
+  "leaks": [[20, 20]],
+  "crew": [[14, 10], [18, 16], [22, 22]],
+  "contract": {
+    "client": "Yard Training Office",
+    "brief": "Strip the training hull. Engine to the barge, plating to the furnace.",
+    "quota": 3000,
+    "timeLimit": 600
+  }
+}

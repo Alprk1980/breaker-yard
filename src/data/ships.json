@@ -1,0 +1,540 @@
+[
+  {
+    "id": "ore-hauler-v1",
+    "name": "Ore Hauler",
+    "description": "A battered ore hauler whose silt-choked holds still smell of regolith and spilled coolant.",
+    "width": 20,
+    "height": 16,
+    "arms": [
+      3,
+      13
+    ],
+    "bulkheads": [
+      [
+        7,
+        1,
+        7,
+        14
+      ],
+      [
+        1,
+        8,
+        18,
+        8
+      ]
+    ],
+    "girders": [],
+    "doors": [
+      [
+        7,
+        4
+      ],
+      [
+        7,
+        10
+      ],
+      [
+        4,
+        8
+      ],
+      [
+        12,
+        8
+      ]
+    ],
+    "engine": [
+      1,
+      0,
+      10,
+      0
+    ],
+    "consoles": [
+      [
+        2,
+        10,
+        2,
+        2
+      ]
+    ],
+    "atmosphere": [],
+    "leaks": [
+      [
+        14,
+        12
+      ]
+    ],
+    "crew": [
+      [
+        3,
+        3
+      ],
+      [
+        5,
+        5
+      ],
+      [
+        6,
+        2
+      ]
+    ],
+    "contract": {
+      "client": "Ore Guild",
+      "brief": "Cut the ore hauler for parts. Keep the engine block intact for the barge.",
+      "quota": 1300,
+      "timeLimit": 600
+    }
+  },
+  {
+    "id": "fuel-tanker-9",
+    "name": "Fuel Tanker",
+    "description": "A leaking fuel tanker whose tank baffles are scarred by a hard docking with the ore yard.",
+    "width": 20,
+    "height": 14,
+    "arms": [
+      3,
+      11
+    ],
+    "bulkheads": [
+      [
+        1,
+        6,
+        18,
+        6
+      ],
+      [
+        9,
+        7,
+        9,
+        12
+      ]
+    ],
+    "girders": [],
+    "doors": [
+      [
+        5,
+        6
+      ],
+      [
+        14,
+        6
+      ],
+      [
+        9,
+        9
+      ]
+    ],
+    "engine": [
+      1,
+      0,
+      10,
+      0
+    ],
+    "consoles": [
+      [
+        2,
+        2,
+        2,
+        3
+      ]
+    ],
+    "atmosphere": [],
+    "leaks": [
+      [
+        15,
+        10
+      ]
+    ],
+    "crew": [
+      [
+        4,
+        2
+      ],
+      [
+        7,
+        3
+      ],
+      [
+        12,
+        2
+      ]
+    ],
+    "contract": {
+      "client": "Fuel Trust",
+      "brief": "Strip the tanker's plating and salvage the drive. Watch the toxic vent.",
+      "quota": 1300,
+      "timeLimit": 600
+    }
+  },
+  {
+    "id": "survey-cutter-7",
+    "name": "Survey Cutter 7",
+    "description": "A survey cutter that mapped the ice fields before its reactor cooled and left the decks gasping.",
+    "width": 30,
+    "height": 20,
+    "arms": [
+      4,
+      16
+    ],
+    "bulkheads": [
+      [
+        14,
+        1,
+        14,
+        9
+      ]
+    ],
+    "girders": [
+      [
+        1,
+        10,
+        28,
+        10
+      ],
+      [
+        1,
+        14,
+        28,
+        14
+      ]
+    ],
+    "doors": [
+      [
+        14,
+        5
+      ]
+    ],
+    "engine": [
+      29,
+      5,
+      29,
+      14
+    ],
+    "consoles": [
+      [
+        20,
+        2,
+        4,
+        2
+      ]
+    ],
+    "atmosphere": [],
+    "leaks": [
+      [
+        25,
+        7
+      ]
+    ],
+    "crew": [
+      [
+        3,
+        3
+      ],
+      [
+        5,
+        6
+      ],
+      [
+        7,
+        8
+      ]
+    ],
+    "contract": {
+      "client": "Meridian Survey Co",
+      "brief": "Recover the survey console and engine; the toxic leak keeps the aft deck unusable.",
+      "quota": 1900,
+      "timeLimit": 600
+    }
+  },
+  {
+    "id": "mining-tender-12",
+    "name": "Mining Tender 12",
+    "description": "A battered mining tender held for salvage, its drill bay stripped and a toxic coolant seep left in the mid deck.",
+    "width": 30,
+    "height": 24,
+    "arms": [
+      4,
+      19
+    ],
+    "bulkheads": [
+      [
+        22,
+        1,
+        22,
+        22
+      ]
+    ],
+    "girders": [
+      [
+        1,
+        5,
+        21,
+        5
+      ],
+      [
+        1,
+        18,
+        21,
+        18
+      ],
+      [
+        23,
+        12,
+        28,
+        12
+      ]
+    ],
+    "doors": [
+      [
+        22,
+        10
+      ],
+      [
+        22,
+        14
+      ]
+    ],
+    "engine": [
+      29,
+      9,
+      29,
+      16
+    ],
+    "consoles": [
+      [
+        4,
+        8,
+        3,
+        2
+      ]
+    ],
+    "atmosphere": [],
+    "leaks": [
+      [
+        18,
+        10
+      ]
+    ],
+    "crew": [
+      [
+        10,
+        10
+      ],
+      [
+        12,
+        12
+      ],
+      [
+        14,
+        14
+      ]
+    ],
+    "contract": {
+      "client": "Orbital Salvage Co",
+      "brief": "Strip the tender for hull plating and the engine block; mind the toxic seep in the mid deck.",
+      "quota": 1800,
+      "timeLimit": 600
+    }
+  },
+  {
+    "id": "cargo-lighter-3",
+    "name": "Cargo Lighter",
+    "description": "A stubby cargo lighter that spent its life ferrying ore casks to the outer docks.",
+    "width": 26,
+    "height": 18,
+    "arms": [
+      5,
+      13
+    ],
+    "bulkheads": [
+      [
+        10,
+        1,
+        10,
+        16
+      ]
+    ],
+    "girders": [
+      [
+        1,
+        3,
+        6,
+        3
+      ],
+      [
+        1,
+        14,
+        6,
+        14
+      ],
+      [
+        19,
+        3,
+        24,
+        3
+      ],
+      [
+        19,
+        14,
+        24,
+        14
+      ]
+    ],
+    "doors": [
+      [
+        10,
+        8
+      ]
+    ],
+    "engine": [
+      18,
+      0,
+      21,
+      0
+    ],
+    "consoles": [
+      [
+        3,
+        6,
+        3,
+        2
+      ],
+      [
+        14,
+        3,
+        4,
+        2
+      ]
+    ],
+    "atmosphere": [],
+    "leaks": [
+      [
+        20,
+        10
+      ]
+    ],
+    "crew": [
+      [
+        2,
+        8
+      ],
+      [
+        4,
+        8
+      ],
+      [
+        6,
+        8
+      ]
+    ],
+    "contract": {
+      "client": "Halden Salvage",
+      "brief": "Deliver the engine block intact and strip the plating before the tide clock hits zero.",
+      "quota": 1650,
+      "timeLimit": 600
+    }
+  },
+  {
+    "id": "patrol-corvette-4",
+    "name": "Patrol Corvette",
+    "description": "A retired patrol corvette with a heavy stern drive and a split deck, still stiffened by old girders.",
+    "width": 30,
+    "height": 22,
+    "arms": [
+      4,
+      18
+    ],
+    "bulkheads": [
+      [
+        8,
+        2,
+        8,
+        4
+      ],
+      [
+        8,
+        6,
+        8,
+        15
+      ],
+      [
+        8,
+        17,
+        8,
+        19
+      ]
+    ],
+    "doors": [
+      [
+        8,
+        10
+      ]
+    ],
+    "girders": [
+      [
+        1,
+        1,
+        28,
+        1
+      ],
+      [
+        1,
+        5,
+        28,
+        5
+      ],
+      [
+        1,
+        16,
+        28,
+        16
+      ],
+      [
+        1,
+        20,
+        28,
+        20
+      ]
+    ],
+    "engine": [
+      29,
+      9,
+      29,
+      12
+    ],
+    "consoles": [
+      [
+        10,
+        9,
+        3,
+        2
+      ]
+    ],
+    "atmosphere": [],
+    "leaks": [
+      [
+        20,
+        10
+      ]
+    ],
+    "crew": [
+      [
+        4,
+        8
+      ],
+      [
+        6,
+        12
+      ],
+      [
+        2,
+        10
+      ]
+    ],
+    "contract": {
+      "client": "Orbital Salvage Co",
+      "brief": "Cut the corvette into sound sections, keep the drive intact for the barge, and clear the toxic leak.",
+      "quota": 2000,
+      "timeLimit": 720
+    }
+  }
+]
