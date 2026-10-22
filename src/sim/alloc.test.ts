@@ -1,9 +1,19 @@
 import { Session } from 'node:inspector/promises';
 import { getHeapSpaceStatistics } from 'node:v8';
 import { describe, expect, it } from 'vitest';
-import { HazardKind } from './HazardLog';
 import { PawnState } from './PawnManager';
-import { DEMO, buildDemoHull, grappleHull, looseDeckPatch, seedDemoCrew, setRoomPressure, warmUpCrew, warmUpKernels } from './scenes';
+import { HazardKind } from './HazardLog';
+import {
+  DEMO,
+  buildDemoHull,
+  grappleHull,
+  looseDeckPatch,
+  seedDemoCrew,
+  setRoomPressure,
+  strandedCrewman,
+  warmUpCrew,
+  warmUpKernels,
+} from './scenes';
 import { Simulation } from './Simulation';
 import { TileFlags } from './TileFlags';
 import { ToolKind } from './WorkOrderQueue';
@@ -122,6 +132,18 @@ describe('tick loop allocations', () => {
     expect(fleeing / TICKS).toBeLessThan(MAX_BYTES_PER_TICK);
   });
 
+  it('allocates nothing per tick through a space rescue: suit air, knockout, flight out, carry back', { timeout: 300_000 }, () => {
+    warmUpKernels(new World());
+    warmUpCrew(new Simulation());
+    rescueScenario(new Simulation(), false);
+    rescueScenario(new Simulation(), false);
+    const sim = new Simulation();
+    const bytes = rescueScenario(sim, true);
+    console.log(`new-space bytes over ${TICKS} sim ticks: rescue=${bytes}`);
+    expect(sim.hazards.countOf(HazardKind.RESCUED)).toBe(1);
+    expect(bytes / TICKS).toBeLessThan(MAX_BYTES_PER_TICK);
+  });
+
   it(
     'allocates nothing per tick while the crew tows a chunk to a bin and flies home',
     { timeout: 300_000 },
@@ -157,6 +179,17 @@ describe('tick loop allocations', () => {
     },
   );
 });
+
+/**
+ * A crewman blown out unconscious and a rescue: knockout, walk to the edge, flight out, grab,
+ * flight back, carry, set down, recovery. Two unmeasured runs, then one measured.
+ */
+function rescueScenario(sim: Simulation, measure: boolean): number {
+  strandedCrewman(sim);
+  if (measure) return bytesAllocatedDuring(sim, TICKS);
+  for (let t = 0; t < TICKS; t++) sim.tick();
+  return 0;
+}
 
 /**
  * Four pawns in a vented demo hull with a loose deck patch by an opened stern: one tows it

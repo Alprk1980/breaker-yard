@@ -172,13 +172,19 @@ setInterval(() => {
   const P = sim.pawns;
   let cutting = 0;
   let hauling = 0;
+  let down = 0;
+  let rescuing = 0;
   for (let p = 0; p < P.capacity; p++) {
     if (P.alive[p] === 0) continue;
     const st = P.state[p];
     if (st === PawnState.NAVIGATING || st === PawnState.PRE_CUT || st === PawnState.DISASSEMBLING) cutting++;
     if (st === PawnState.APPROACHING || st === PawnState.TUGGING || st === PawnState.RETURNING) hauling++;
+    if (st === PawnState.DOWN) down++;
+    if (st === PawnState.RESCUE_GO || st === PawnState.RESCUE_FLY || st === PawnState.RESCUE_CARRY) rescuing++;
   }
-  let crew = `${job}\ncrew ${P.count} (${cutting} cutting, ${hauling} hauling)  orders ${sim.orders.count}`;
+  let crew =
+    `${job}\ncrew ${P.count} (${cutting} cutting, ${hauling} hauling, ${rescuing} rescuing, ${down} down)` +
+    `  orders ${sim.orders.count}`;
   const sel = renderer.selectedPawn;
   if (sel >= 0 && P.alive[sel]) {
     const prio: string[] = [];
@@ -188,6 +194,7 @@ setInterval(() => {
     }
     crew +=
       `\npawn ${sel}: ${PAWN_STATE_NAMES[P.state[sel]]}  jobs ${prio.join(', ')} (C / H to change)` +
+      `\n  health ${P.health[sel].toFixed(0)}  air ${P.oxygen[sel].toFixed(0)} s  suit ${P.suit[sel].toFixed(0)}%` +
       `\n  boots ${P.magBoot[sel] ? 'locked' : 'free'}  work ${P.progress[sel].toFixed(0)}%` +
       `  v (${P.vel[sel * 2].toFixed(2)}, ${P.vel[sel * 2 + 1].toFixed(2)})`;
   }
