@@ -36,11 +36,23 @@ export class Salvage {
     return z;
   }
 
-  /** Index of the zone that fully contains the box `[x0, x1] x [y0, y1]`, or -1. */
-  zoneContaining(x0: number, y0: number, x1: number, y1: number): number {
+  /**
+   * Index of the zone that fully contains the box `[x0, x1] x [y0, y1]` read from
+   * `box[at .. at + 4)`, grown by `margin` on every side, or -1. The box comes in as an
+   * array and index rather than four numbers: a fractional number passed to a call V8 does
+   * not inline is boxed on the heap, once per argument per call.
+   */
+  zoneContaining(box: Float32Array, at: number, margin: number): number {
     const r = this.zoneRect;
     for (let z = 0; z < this.zoneCount; z++) {
-      if (x0 >= r[z * 4] && y0 >= r[z * 4 + 1] && x1 <= r[z * 4 + 2] && y1 <= r[z * 4 + 3]) return z;
+      if (
+        box[at] - margin >= r[z * 4] &&
+        box[at + 1] - margin >= r[z * 4 + 1] &&
+        box[at + 2] + margin <= r[z * 4 + 2] &&
+        box[at + 3] + margin <= r[z * 4 + 3]
+      ) {
+        return z;
+      }
     }
     return -1;
   }

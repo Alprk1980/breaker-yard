@@ -123,7 +123,7 @@ describe('tick loop allocations', () => {
   });
 
   it(
-    "the crew's hauling code allocates nothing per tick: approach, tug, delivery, flight home",
+    'allocates nothing per tick while the crew tows a chunk to a bin and flies home',
     { timeout: 300_000 },
     async () => {
       warmUpKernels(new World());
@@ -148,13 +148,12 @@ describe('tick loop allocations', () => {
         for (const c of n.children) walk(c);
       };
       walk(profile.head);
-      // The total also holds JIT churn in the gas and debris kernels: V8 re-tiers `flow`, `diffuse`
-      // and `DebrisField.step` every time a lone chunk comes and goes (tens of bytes per tick, not
-      // from this code). Logged so it stays visible.
       console.log(`new-space bytes over ${TICKS} sim ticks: hauling=${bytes} (PawnManager per-tick: ${pawnBytes})`);
       expect(towed).toBe(true);
       expect(sim.world.salvage.credits).toBeGreaterThan(0);
       expect(pawnBytes).toBe(0);
+      // Boarding and delivery are one-offs of a few KB; everything else must be allocation-free.
+      expect(bytes / TICKS).toBeLessThan(MAX_BYTES_PER_TICK);
     },
   );
 });
