@@ -30,6 +30,28 @@ describe('demo hull', () => {
     expect(w.gas.getVentImpulse(DEMO.hull.x1, 64).x).toBeGreaterThan(0);
   });
 
+  it('blows out a 1 bar breach in seconds, without overshoot or loss of mass', { timeout: 30_000 }, () => {
+    const w = new World();
+    buildDemoHull(w);
+    const mass = w.gas.totalMass();
+    w.cutTile(DEMO.hull.x1, 64);
+    for (let t = 0; t < 100; t++) {
+      w.tick();
+      expect(w.gas.totalMass() + w.gas.vacuumAbsorbed).toBeCloseTo(mass, 0);
+    }
+    // Five seconds through a single tile: dramatic, but not instant.
+    expect(w.gas.totalMass()).toBeLessThan(mass * 0.75);
+    expect(w.gas.totalMass()).toBeGreaterThan(mass * 0.4);
+    let peak = 0;
+    for (let i = 0; i < w.gas.cellCount; i++) peak = Math.max(peak, w.gas.current[i]);
+    expect(peak).toBeLessThanOrEqual(DEMO.roomPressure + 1e-5);
+    // The stream beats magboot grip (drag 12 per bar/tile against 6) at the hole and a tile in.
+    expect(w.gas.getVentImpulse(DEMO.hull.x1, 64).x).toBeGreaterThan(1);
+    expect(w.gas.getVentImpulse(DEMO.hull.x1 - 1, 64).x).toBeGreaterThan(0.5);
+    for (let t = 0; t < 600; t++) w.tick();
+    expect(w.gas.totalMass()).toBeLessThan(mass * 0.05);
+  });
+
   it('tears free when one gantry arm is cut', () => {
     const w = new World();
     buildDemoHull(w);

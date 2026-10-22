@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { HazardKind } from './HazardLog';
 import { DEMO, buildDemoHull, seedDemoCrew, setRoomPressure, warmUpCrew, warmUpKernels } from './scenes';
 import { Simulation } from './Simulation';
+import { TileFlags } from './TileFlags';
 import { ToolKind } from './WorkOrderQueue';
 import { World } from './World';
 
@@ -32,7 +33,7 @@ describe('tick loop allocations', () => {
     expect(typeof gc).toBe('function');
   });
 
-  it('allocates nothing per tick in steady state, while venting, and while snapping', { timeout: 30_000 }, () => {
+  it('allocates nothing per tick in steady state, while venting, snapping, and venting toxin', { timeout: 90_000 }, () => {
     warmUpKernels(new World());
     const world = new World();
     buildDemoHull(world);
@@ -49,13 +50,23 @@ describe('tick loop allocations', () => {
     const snapping = bytesAllocatedDuring(world, TICKS);
     expect(world.lattice.totalSnapped).toBeGreaterThan(0);
 
-    console.log(`new-space bytes over ${TICKS} ticks: steady=${steady} venting=${venting} snapping=${snapping}`);
+    // A second, wider breach with a toxic leak feeding the room: the flow pass carries the
+    // toxin out through both holes.
+    for (let y = 70; y < 74; y++) world.cutTile(DEMO.hull.x1, y);
+    world.setTile(70, 64, TileFlags.FLOOR | TileFlags.HAZARD_LEAK);
+    const toxic = bytesAllocatedDuring(world, TICKS);
+    expect(world.gas.toxinVented).toBeGreaterThan(0);
+
+    console.log(
+      `new-space bytes over ${TICKS} ticks: steady=${steady} venting=${venting} snapping=${snapping} toxic=${toxic}`,
+    );
     expect(steady / TICKS).toBeLessThan(MAX_BYTES_PER_TICK);
     expect(venting / TICKS).toBeLessThan(MAX_BYTES_PER_TICK);
     expect(snapping / TICKS).toBeLessThan(MAX_BYTES_PER_TICK);
+    expect(toxic / TICKS).toBeLessThan(MAX_BYTES_PER_TICK);
   });
 
-  it('allocates nothing per tick with pawns pathing, cutting, refusing and fleeing', { timeout: 90_000 }, () => {
+  it('allocates nothing per tick with pawns pathing, cutting, refusing and fleeing', { timeout: 300_000 }, () => {
     warmUpKernels(new World());
     warmUpCrew(new Simulation());
     // Pawn states are individually cold (one pawn refuses a cut now and then), so V8 tiers

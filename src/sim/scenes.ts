@@ -80,7 +80,7 @@ export function setRoomPressure(world: World, bar: number): void {
 }
 
 /**
- * Runs every tick-loop branch (sealed, venting, snapping, floating) on a throwaway
+ * Runs every tick-loop branch (sealed, venting, leaking, snapping, floating) on a throwaway
  * world so V8 optimises the kernels before the real scene starts. Without this, the
  * first breach or snap runs briefly in unoptimised code, which boxes doubles.
  */
@@ -89,6 +89,7 @@ export function warmUpKernels(world: World, ticksPerPhase = 300): void {
   for (let t = 0; t < ticksPerPhase; t++) world.tick();
   world.cutTile(DEMO.hull.x1, 64);
   world.injectGas(DEMO.hull.x0 + 3, 64);
+  world.setTile(DEMO.hull.x0 + 20, 64, FLOOR | TileFlags.HAZARD_LEAK);
   for (let t = 0; t < ticksPerPhase; t++) world.tick();
   world.cutTile(DEMO.gantry.x + 3, DEMO.armRows[0]);
   for (let t = 0; t < ticksPerPhase; t++) world.tick();

@@ -83,8 +83,17 @@ export class World {
   /** One fixed 50 ms tick. Allocation-free. */
   tick(): void {
     const tiles = this.tiles;
+    // Inlined `GasGrid.addToxicGas`: a leak is often a single tile, so a call per leak would
+    // stay cold, and V8's unoptimised tiers box every double they add.
+    const gas = this.gas;
+    const cells = gas.cells;
+    const cur = gas.current;
+    const tox = gas.toxin;
     for (let i = 0; i < CELL_COUNT; i++) {
-      if ((tiles[i] & TileFlags.HAZARD_LEAK) !== 0) this.gas.addToxicGas(i, LEAK_RATE_BAR);
+      if ((tiles[i] & TileFlags.HAZARD_LEAK) !== 0 && cells[i] === GasCell.OPEN) {
+        cur[i] += LEAK_RATE_BAR;
+        tox[i] += LEAK_RATE_BAR;
+      }
     }
     this.gas.step();
     this.lattice.step();

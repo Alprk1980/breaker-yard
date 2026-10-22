@@ -196,6 +196,23 @@ describe('PawnManager decompression', () => {
     expect(pawns.state[p]).toBe(PawnState.FLEEING);
   });
 
+  it('is dragged out through a 1 bar breach once the stream builds, and the jet beats its thrusters', () => {
+    const sim = pressurisedRoom(1.0);
+    const { world, pawns } = sim;
+    world.cutTile(WALL.x, WALL.y);
+    for (let t = 0; t < 10; t++) sim.tick();
+    const booted = pawns.spawn(WALL.x, WALL.y); // standing in the hole
+    const adrift = pawns.spawn(WALL.x - 2, WALL.y);
+    pawns.pos[adrift * 2] = WALL.x + 1.5; // just outside, in the jet
+    sim.tick();
+    expect(pawns.magBoot[booted]).toBe(1);
+    expect(pawns.vel[booted * 2]).toBeGreaterThan(0.3); // magboots slip
+    expect(pawns.magBoot[adrift]).toBe(0);
+    expect(pawns.vel[adrift * 2]).toBeGreaterThan(0); // thrusters aim back aboard, the jet wins
+    for (let t = 0; t < 10; t++) sim.tick();
+    expect(pawns.pos[adrift * 2]).toBeGreaterThan(WALL.x + 2); // carried clear of the jet cell
+  });
+
   it('thrusts back to the nearest floor when knocked adrift, then clamps on', () => {
     const sim = new Simulation();
     const { world, pawns, hazards } = sim;
