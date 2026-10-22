@@ -87,6 +87,17 @@ describe('fuel tanks', () => {
     for (const x of [64, 67, 70]) expect(w.getTile(x, 60) & TileFlags.FUEL).toBe(0);
   });
 
+  it('chain through every tile of big tanks, however many go off in the same tick', () => {
+    // Two 2x2 tanks: one cut sets off several tiles at once, and each of those queues more.
+    const w = hull();
+    addFuelTank(w, 70, 57, 2, 2);
+    addFuelTank(w, 74, 57, 2, 2);
+    w.cutTile(70, 57);
+    run(w, 10);
+    expect(w.explosionsTotal).toBe(8);
+    for (let y = 57; y <= 58; y++) for (let x = 70; x <= 75; x++) expect(w.getTile(x, y) & TileFlags.FUEL).toBe(0);
+  });
+
   it('cook off when fire burns beside them', { timeout: 30_000 }, () => {
     const w = hull();
     addFuelTank(w, 70, 64, 1, 1);

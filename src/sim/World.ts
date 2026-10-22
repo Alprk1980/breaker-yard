@@ -45,8 +45,13 @@ export class World {
   tickCount = 0;
   /** Heat per fuel-tank tile, 0..1; at 1 it explodes. */
   readonly tankHeat = new Float32Array(CELL_COUNT);
-  /** Tank cells set off by a neighbouring blast, to explode next tick (a chain, one link per tick). */
-  private readonly fuses = new Int32Array(CELL_COUNT);
+  /**
+   * Tank cells set off by a neighbouring blast or by fire, to explode next tick (a chain, one
+   * link per tick). Double-buffered: tanks going off this tick queue their neighbours into
+   * the other buffer, so they cannot overwrite entries still waiting their turn.
+   */
+  private fuses = new Int32Array(CELL_COUNT);
+  private fusesNow = new Int32Array(CELL_COUNT);
   private fuseCount = 0;
   /** Cells that exploded since the simulation last cleared them, and how many; explosions ever. */
   readonly blasts = new Int32Array(MAX_BLASTS);
@@ -239,9 +244,12 @@ export class World {
     // Tanks primed last tick (by a blast or by fire) go off now. `blasts` collects every
     // explosion (the player's torch can set one off between ticks) until the simulation has
     // let the crew feel them and cleared it.
-    const fuses = this.fuseCount;
+    const lit = this.fuses;
+    const count = this.fuseCount;
+    this.fuses = this.fusesNow;
+    this.fusesNow = lit;
     this.fuseCount = 0;
-    for (let k = 0; k < fuses; k++) this.explode(this.fuses[k]);
+    for (let k = 0; k < count; k++) this.explode(lit[k]);
     const tiles = this.tiles;
     // Inlined `GasGrid.addToxicGas`: a leak is often a single tile, so a call per leak would
     // stay cold, and V8's unoptimised tiers box every double they add.
