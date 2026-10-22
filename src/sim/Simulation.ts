@@ -1,5 +1,5 @@
 import { TICK_DT } from './constants';
-import { HazardLog } from './HazardLog';
+import { HazardKind, HazardLog } from './HazardLog';
 import { PathGrid } from './PathGrid';
 import { PawnManager } from './PawnManager';
 import { TileFlags, isLoadBearing } from './TileFlags';
@@ -39,6 +39,14 @@ export class Simulation {
         this.orders.cancelOrder(i % w, (i / w) | 0);
       }
     }
+    // Explosions since last tick (fire, chains, or the player's torch): the crew feels them.
+    for (let k = 0; k < world.blastCount; k++) {
+      const c = world.blasts[k];
+      const w = world.width;
+      this.pawns.blast(c % w, (c / w) | 0);
+      this.hazards.log(HazardKind.EXPLOSION, -1, c % w, (c / w) | 0, world.tickCount, 0);
+    }
+    world.blastCount = 0;
     this.paths.updateCostGrid(world.gas, world.lattice);
     this.orders.tick();
     this.pawns.tick(TICK_DT);

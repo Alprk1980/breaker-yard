@@ -110,6 +110,13 @@ export function warmUpKernels(world: World, ticksPerPhase = 300): void {
   world.cutTile(DEMO.gantry.x + 3, DEMO.armRows[0]);
   for (let t = 0; t < ticksPerPhase; t++) world.tick();
   towIntoGantry(world, ticksPerPhase);
+  // A cabin fire, a tank cooking off in it, and the vent that puts it out.
+  buildDemoHull(world);
+  addFuelTank(world, 70, 64, 1, 1);
+  world.gas.ignite(world.index(66, 64), 1);
+  for (let t = 0; t < ticksPerPhase; t++) world.tick();
+  for (let y = 60; y <= 68; y++) world.cutTile(DEMO.hull.x1, y);
+  for (let t = 0; t < ticksPerPhase; t++) world.tick();
   world.clear();
 }
 
@@ -185,6 +192,13 @@ export function strandedCrewman(sim: Simulation): number {
   return v;
 }
 
+/** Fills the rect (x0, y0)-(x0 + w - 1, y0 + h - 1) with fuel tank tiles: solid, and explosive. */
+export function addFuelTank(world: World, x0: number, y0: number, w: number, h: number): void {
+  for (let y = y0; y < y0 + h; y++) {
+    for (let x = x0; x < x0 + w; x++) world.setTile(x, y, BULKHEAD | TileFlags.FUEL, 1, Material.HULL_PLATE);
+  }
+}
+
 /** Spawns the demo crew inside the main room. */
 export function seedDemoCrew(sim: Simulation): void {
   for (const [x, y] of DEMO.crew) sim.pawns.spawn(x, y);
@@ -238,6 +252,12 @@ export function warmUpCrew(sim: Simulation, cycles = 3, ticksPerPhase = 300): vo
     // A crewman blown out unconscious, flown out to and carried back aboard.
     strandedCrewman(sim);
     for (let t = 0; t < ticksPerPhase * 3; t++) sim.tick();
+    // A cabin fire the crew runs from, and burns in.
+    buildDemoHull(world);
+    sim.resetCrew();
+    seedDemoCrew(sim);
+    world.gas.ignite(world.index(66, 64), 1);
+    for (let t = 0; t < ticksPerPhase; t++) sim.tick();
   }
   world.clear();
   sim.resetCrew();

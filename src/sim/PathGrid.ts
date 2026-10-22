@@ -34,6 +34,9 @@ const WALL = GasCell.WALL;
 export const BREATHABLE_BAR = 0.6;
 export const BREATHABLE_TOXIN_BAR = 0.2;
 
+/** Path cost added at full fire intensity: pawns route around flames where they can. */
+export const FIRE_PENALTY = 2000;
+
 const DIAG_NUM = 14;
 const DIAG_DEN = 10;
 
@@ -57,6 +60,7 @@ export function updateCostGrid(
   const cells = gasGrid.cells;
   const p = gasGrid.current;
   const tox = gasGrid.toxin;
+  const fire = gasGrid.fire;
 
   for (let y = 0; y < h; y++) {
     const row = y * w;
@@ -108,7 +112,9 @@ export function updateCostGrid(
       if (pressurePenalty > PRESSURE_PENALTY_CAP) pressurePenalty = PRESSURE_PENALTY_CAP;
       let toxinPenalty = tox[i] * TOXIN_PENALTY_PER_BAR;
       if (toxinPenalty > TOXIN_PENALTY_CAP) toxinPenalty = TOXIN_PENALTY_CAP;
-      cost[i] = (COST_BASE + pressurePenalty + toxinPenalty) | 0;
+      let firePenalty = fire[i] * FIRE_PENALTY;
+      if (firePenalty > FIRE_PENALTY) firePenalty = FIRE_PENALTY;
+      cost[i] = (COST_BASE + pressurePenalty + toxinPenalty + firePenalty) | 0;
     }
   }
 

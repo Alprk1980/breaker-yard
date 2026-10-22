@@ -95,10 +95,21 @@ export const STEER_GAIN = 3;
 export const SAFE_SEARCH_TILES = 1200;
 export const LAUNCH_SEARCH_RADIUS = 24;
 /**
- * A downed pawn set down somewhere without breathable air (because none was in reach) is
- * left this long before anyone tries again, rather than being picked up over and over.
+ * A downed pawn set down somewhere without breathable air (because none was in reach), or one
+ * nobody could plan a way to, is left this long before anyone tries again, rather than being
+ * picked up, or searched for, over and over.
  */
 export const RESCUE_RETRY_TICKS = 600;
+/** Health and suit integrity lost per second at full fire intensity. */
+export const FIRE_DAMAGE = 20;
+export const FIRE_SUIT_DAMAGE = 10;
+/** Fire intensity at the pawn's tile that sends it running. */
+export const FIRE_FLEE = 0.2;
+/** Blast reach (tiles), and at the centre: health and suit lost, and the shove (tiles/s). */
+export const BLAST_RADIUS = 5;
+export const BLAST_DAMAGE = 70;
+export const BLAST_SUIT_DAMAGE = 40;
+export const BLAST_SHOVE = 10;
 
 /** A hauler's thruster force limit, mass * tiles/s^2 (the player's grapple has 150). */
 export const TUG_FORCE = 60;
@@ -135,8 +146,10 @@ export const PawnWarning = {
   STRESS: 0x08,
   /** Not on a floor tile. */
   ADRIFT: 0x10,
+  /** In or next to fire. */
+  FIRE: 0x20,
 } as const;
-export const PAWN_WARNING_BITS = 5;
+export const PAWN_WARNING_BITS = 6;
 
 /** Largest differential a pawn will cut through, in bar. */
 export const MAX_CUT_DELTA_BAR = 2.0;
@@ -203,6 +216,11 @@ const RESCUE_GO = PawnState.RESCUE_GO;
 const RESCUE_FLY = PawnState.RESCUE_FLY;
 const RESCUE_CARRY = PawnState.RESCUE_CARRY;
 const JOB_RESCUE = JobKind.RESCUE;
+/** Life events the hot tick hands to `lifeEvent`. */
+const LIFE_NONE = 0;
+const LIFE_KNOCK_OUT = 1;
+const LIFE_WAKE = 2;
+const LIFE_DIE = 3;
 const JOB_CUT = JobKind.CUT;
 const JOB_HAUL = JobKind.HAUL;
 const SEVER = OrderKind.SEVER;
@@ -215,6 +233,7 @@ const W_VENT = PawnWarning.VENT;
 const W_TOXIC = PawnWarning.TOXIC;
 const W_STRESS = PawnWarning.STRESS;
 const W_ADRIFT = PawnWarning.ADRIFT;
+const W_FIRE = PawnWarning.FIRE;
 const H_CUT_REFUSED = HazardKind.CUT_REFUSED_PRESSURE;
 const H_CUT_ABORTED = HazardKind.CUT_ABORTED_PRESSURE;
 const H_DECOMPRESSION = HazardKind.DECOMPRESSION;
@@ -225,6 +244,8 @@ const H_HAUL_ABANDONED = HazardKind.HAUL_ABANDONED;
 const H_KNOCKED_OUT = HazardKind.KNOCKED_OUT;
 const H_DIED = HazardKind.DIED;
 const H_RESCUED = HazardKind.RESCUED;
+const H_CUT_REFUSED_FUEL = HazardKind.CUT_REFUSED_FUEL;
+const FUEL = TileFlags.FUEL;
 const OPEN = GasCell.OPEN;
 const WALL = GasCell.WALL;
 const HEAVY_CUTTER = ToolKind.HEAVY_CUTTER;
@@ -471,6 +492,31 @@ export class PawnManager {
     }
   }
 
+  /**
+   * An explosion at tile (cx, cy): every pawn within `BLAST_RADIUS` is hurt and thrown
+   * outward, more the closer it was. A one-off event.
+   */
+  blast(cx: number, cy: number): void {
+    const bx = cx + 0.5;
+    const by = cy + 0.5;
+    for (let p = 0; p < MAX_PAWNS; p++) {
+      if (this.alive[p] === 0) continue;
+      const dx = this.pos[p * 2] - bx;
+      const dy = this.pos[p * 2 + 1] - by;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      if (d >= BLAST_RADIUS) continue;
+      const k = 1 - d / BLAST_RADIUS;
+      this.health[p] -= BLAST_DAMAGE * k;
+      this.suit[p] = Math.max(0, this.suit[p] - BLAST_SUIT_DAMAGE * k);
+      if (this.carriedBy[p] >= 0 || this.ride[p] >= 0) continue;
+      const ux = d > 1e-3 ? dx / d : 1;
+      const uy = d > 1e-3 ? dy / d : 0;
+      this.vel[p * 2] += ux * BLAST_SHOVE * k;
+      this.vel[p * 2 + 1] += uy * BLAST_SHOVE * k;
+      this.clamp[p] = 0;
+    }
+  }
+
   /** One fixed tick. Allocation-free. */
   tick(dt: number): void {
     this.scalars[S_DT] = dt;
@@ -495,27 +541,44 @@ export class PawnManager {
     const vel = this.vel;
 
     // --- Needs: suit air, suit integrity, health ---
+    // Branch-free on purpose, like the rest of this function: every load and every sum runs
+    // every tick and the ternaries only choose between values already computed. A load or a
+    // sum inside a rarely taken arm (the first time a suit runs dry, say) has no type
+    // feedback, and reaching it throws away the optimised code for the whole pawn tick.
+    // Cells that are not open hold no gas, toxin or fire, so they read as zero.
     const nw = world.width;
     const ni = Math.floor(pos[p * 2 + 1]) * nw + Math.floor(pos[p * 2]);
-    const open = gas.cells[ni] === OPEN;
-    const press = open ? gas.current[ni] : 0;
-    const toxBar = open ? gas.toxin[ni] : 0;
-    const breathable = press >= BREATHABLE_BAR && toxBar < BREATHABLE_TOXIN_BAR;
-    const o2Rate = breathable ? O2_REFILL : this.suit[p] < SUIT_BREACH ? -O2_DRAIN_BREACHED : -O2_DRAIN;
-    const o2Raw = this.oxygen[p] + o2Rate * dt;
-    const o2 = o2Raw > SUIT_O2 ? SUIT_O2 : o2Raw < 0 ? 0 : o2Raw;
+    const press = gas.current[ni];
+    const toxBar = gas.toxin[ni];
+    const fireHere = gas.fire[ni];
+    const airOk = press >= BREATHABLE_BAR;
+    const clean = toxBar < BREATHABLE_TOXIN_BAR;
+    const breathable = airOk && clean;
+    const suitNow = this.suit[p];
+    const breached = suitNow < SUIT_BREACH;
+    const drain = (breached ? O2_DRAIN_BREACHED : O2_DRAIN) * dt;
+    const refill = O2_REFILL * dt;
+    const o2Raw = this.oxygen[p] + (breathable ? refill : 0) - (breathable ? 0 : drain);
+    const o2Lo = o2Raw < 0 ? 0 : o2Raw;
+    const o2 = o2Lo > SUIT_O2 ? SUIT_O2 : o2Lo;
     this.oxygen[p] = o2;
-    const suitRaw = this.suit[p] - toxBar * TOXIC_SUIT_DAMAGE * dt;
+    const suitRaw = suitNow - (toxBar * TOXIC_SUIT_DAMAGE + fireHere * FIRE_SUIT_DAMAGE) * dt;
     this.suit[p] = suitRaw < 0 ? 0 : suitRaw;
-    const hpRaw = this.health[p] + (o2 <= 0 ? -SUFFOCATION_DAMAGE : HEAL_RATE) * dt;
+    const hasAir = o2 > 0;
+    const heal = hasAir ? HEAL_RATE : 0;
+    const choke = hasAir ? 0 : SUFFOCATION_DAMAGE;
+    const hpRaw = this.health[p] + (heal - choke - fireHere * FIRE_DAMAGE) * dt;
     const hp = hpRaw > MAX_HEALTH ? MAX_HEALTH : hpRaw;
     this.health[p] = hp;
     this.cellOf[p] = ni;
-    if (hp <= DEATH_HEALTH) {
-      this.die(p);
-      return;
-    }
-    if (hp <= 0 && this.state[p] !== DOWN) this.knockOut(p);
+    // Life events (death, blacking out, coming round) as an integer code, handled out of line.
+    const wasDown = this.state[p] === DOWN;
+    const dead = hp <= DEATH_HEALTH;
+    const out = hp <= 0;
+    const healed = hp >= WAKE_HEALTH;
+    const life = dead ? LIFE_DIE : out && !wasDown ? LIFE_KNOCK_OUT : wasDown && healed ? LIFE_WAKE : LIFE_NONE;
+    this.lifeEvent(p, life);
+    if (dead) return;
 
     // --- Being carried by a rescuer: held at their side ---
     const carrier = this.carriedBy[p];
@@ -589,7 +652,8 @@ export class PawnManager {
     let ty = Math.floor(pos[p * 2 + 1]);
     const onFloor = gas.cells[ty * w + tx] === OPEN;
     // A rescuer launching off the deck lets go of it on purpose.
-    const booted = onFloor && this.state[p] !== RESCUE_FLY;
+    const stNow = this.state[p];
+    const booted = onFloor && stNow !== RESCUE_FLY;
     const imp = gas.getVentImpulse(tx, ty, this.impulse);
     const impMag = Math.sqrt(imp.x * imp.x + imp.y * imp.y);
     const f = impMag * DRAG_GAIN;
@@ -600,9 +664,15 @@ export class PawnManager {
     // Off the deck with somewhere to go (a deck in reach, home, a pawn to fetch): thrusters
     // steer toward the speed wanted there, which falls off on the way in so the pawn arrives
     // rather than slams in. A downed pawn has no one at the controls.
-    const anchor = booted || this.state[p] === DOWN ? -1 : this.anchor[p];
-    const adx = anchor >= 0 ? (anchor % w) + 0.5 - pos[p * 2] : 0;
-    const ady = anchor >= 0 ? ((anchor / w) | 0) + 0.5 - pos[p * 2 + 1] : 0;
+    const isDown = stNow === DOWN;
+    const anc0 = this.anchor[p];
+    const anchor = booted || isDown ? -1 : anc0;
+    const hasAnchor = anchor >= 0;
+    const ancCell = hasAnchor ? anchor : 0;
+    const adx0 = (ancCell % w) + 0.5 - pos[p * 2];
+    const ady0 = ((ancCell / w) | 0) + 0.5 - pos[p * 2 + 1];
+    const adx = hasAnchor ? adx0 : 0;
+    const ady = hasAnchor ? ady0 : 0;
     const ad = Math.sqrt(adx * adx + ady * ady);
     const want = ad * ARRIVE_GAIN < MAX_FLY_SPEED ? ad * ARRIVE_GAIN : MAX_FLY_SPEED;
     const wk = ad > 1e-4 ? want / ad : 0;
@@ -632,12 +702,18 @@ export class PawnManager {
     sc[S_MOVE_Y] = vy * dt;
     this.move(p);
     // Impact: `move` stops a pawn dead at a wall. Hitting one fast hurts, and dents the suit.
-    const hitX = vx !== 0 && vel[p * 2] === 0 ? (vx < 0 ? -vx : vx) : 0;
-    const hitY = vy !== 0 && vel[p * 2 + 1] === 0 ? (vy < 0 ? -vy : vy) : 0;
+    const speedX = Math.abs(vx);
+    const speedY = Math.abs(vy);
+    const stoppedX = vel[p * 2] === 0;
+    const stoppedY = vel[p * 2 + 1] === 0;
+    const hitX = stoppedX ? speedX : 0;
+    const hitY = stoppedY ? speedY : 0;
     const hit = hitX > hitY ? hitX : hitY;
-    const blow = hit > IMPACT_SPEED ? (hit - IMPACT_SPEED) * IMPACT_DAMAGE : 0;
+    const over = hit - IMPACT_SPEED;
+    const blow = (over > 0 ? over : 0) * IMPACT_DAMAGE;
     this.health[p] -= blow;
-    this.suit[p] = this.suit[p] - blow * 0.5 > 0 ? this.suit[p] - blow * 0.5 : 0;
+    const dented = this.suit[p] - blow * 0.5;
+    this.suit[p] = dented > 0 ? dented : 0;
 
     tx = Math.floor(pos[p * 2]);
     ty = Math.floor(pos[p * 2 + 1]);
@@ -647,24 +723,31 @@ export class PawnManager {
       (impMag > FLEE_IMPULSE ? W_VENT : 0) |
       (gas.toxin[ty * w + tx] > TOXIC_WARN_BAR ? W_TOXIC : 0) |
       (onFloor ? 0 : W_ADRIFT) |
+      (gas.fire[ty * w + tx] > FIRE_FLEE ? W_FIRE : 0) |
       (this.stressNear(tx, ty) ? W_STRESS : 0);
     this.warnings[p] = (this.warnings[p] & W_PRESSURE) | live;
 
-    // Stranded: adrift with nothing to thrust for. Needy: down or stranded, and loose.
+    // Stranded: adrift with nothing to thrust for. Needy: stranded, or down out of air, and loose.
     const st = this.state[p];
-    const adrift = !onFloor && this.anchor[p] < 0 && st !== RESCUE_FLY && st !== RESCUE_CARRY && st !== RETURNING;
-    const sTicks = adrift ? this.strandedTicks[p] + 1 : 0;
+    const flyingOut = st === RESCUE_FLY || st === RESCUE_CARRY || st === RETURNING;
+    const noAnchor = this.anchor[p] < 0;
+    const adrift = !onFloor && noAnchor && !flyingOut;
+    const s1 = this.strandedTicks[p] + 1;
+    const sTicks = adrift ? s1 : 0;
     this.strandedTicks[p] = sTicks > 0xffff ? 0xffff : sTicks;
     const wait = this.rescueWait[p];
-    this.rescueWait[p] = wait > 0 ? wait - 1 : 0;
-    this.needy[p] = sTicks >= STRANDED_TICKS || (st === DOWN && !breathable && wait === 0) ? 1 : 0;
+    const wait1 = wait - 1;
+    this.rescueWait[p] = wait > 0 ? wait1 : 0;
+    const stranded = sTicks >= STRANDED_TICKS;
+    const downHere = st === DOWN;
+    const waited = wait === 0;
+    this.needy[p] = waited && (stranded || (downHere && !breathable)) ? 1 : 0;
     this.cellOf[p] = ty * w + tx;
-    if (st === DOWN) {
-      if (this.health[p] >= WAKE_HEALTH) this.wake(p);
-      return;
-    }
+    if (downHere) return;
 
-    const vt = impMag > FLEE_IMPULSE ? this.ventTicks[p] + 1 : 0;
+    // A vent stream or flames at the pawn's feet both count as danger to run from.
+    const danger = impMag > FLEE_IMPULSE || gas.fire[ty * w + tx] > FIRE_FLEE;
+    const vt = danger ? this.ventTicks[p] + 1 : 0;
     this.ventTicks[p] = vt > 255 ? 255 : vt;
     const flying = st === RETURNING || st === RESCUE_FLY || st === RESCUE_CARRY;
     if (st !== FLEEING && !flying && (vt >= FLEE_CONFIRM_TICKS || !onFloor)) {
@@ -687,7 +770,7 @@ export class PawnManager {
         this.tickDisassembling(p, tx, ty);
         break;
       case FLEEING:
-        this.tickFleeing(p, tx, ty, impMag > FLEE_IMPULSE, impMag < CALM_IMPULSE);
+        this.tickFleeing(p, tx, ty, danger, !danger && impMag < CALM_IMPULSE);
         break;
       case APPROACHING:
         this.tickApproaching(p);
@@ -772,6 +855,14 @@ export class PawnManager {
 
   // --- Survival -------------------------------------------------------------------------
 
+  /** Death, blacking out or coming round, decided in the hot tick as a `LIFE_*` code. Integer-only. */
+  private lifeEvent(p: number, life: number): void {
+    if (life === LIFE_NONE) return;
+    if (life === LIFE_DIE) this.die(p);
+    else if (life === LIFE_KNOCK_OUT) this.knockOut(p);
+    else this.wake(p);
+  }
+
   /** Health ran out: drop everything and go down where you are. */
   private knockOut(p: number): void {
     this.hazards.log(H_KNOCKED_OUT, p, this.cellOf[p] % this.world.width, (this.cellOf[p] / this.world.width) | 0, this.world.tickCount, 0);
@@ -846,7 +937,12 @@ export class PawnManager {
     const c = this.cellOf[best];
     const onDeck = this.world.gas.cells[c] === OPEN && this.paths.cost[c] !== COST_IMPASSABLE;
     const goal = onDeck ? c : this.launchTile(c);
-    if (goal < 0 || !this.planPath(p, tx, ty, goal % w, (goal / w) | 0, false)) return false;
+    if (goal < 0 || !this.planPath(p, tx, ty, goal % w, (goal / w) | 0, false)) {
+      // No way to them from here: give it a while rather than searching again every tick.
+      this.rescueWait[best] = RESCUE_RETRY_TICKS;
+      this.needy[best] = 0;
+      return false;
+    }
     this.rescuer[best] = p;
     this.rescueTarget[p] = best;
     this.rescueFly[p] = onDeck ? 0 : 1;
@@ -1330,6 +1426,12 @@ export class PawnManager {
     const oy = this.target[p * 2 + 1];
     if (!this.inReach(p, tx, ty, ox, oy)) {
       this.resumeNavigation(p);
+      return;
+    }
+    if ((this.world.tiles[oy * this.world.width + ox] & FUEL) !== 0) {
+      // A torch on a fuel tank is a bomb: leave it for whoever means it.
+      this.hazards.log(H_CUT_REFUSED_FUEL, p, ox, oy, this.world.tickCount, 0);
+      this.dropOrder(p, REFUSAL_SUSPEND_TICKS);
       return;
     }
     const gas = this.world.gas;

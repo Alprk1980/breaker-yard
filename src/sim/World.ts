@@ -1,4 +1,4 @@
-import { CELL_COUNT, HEIGHT, INJECT_PRESSURE_BAR, WIDTH } from './constants';
+import { CELL_COUNT, HEIGHT, INJECT_PRESSURE_BAR, TICK_DT, WIDTH } from './constants';
 import { DebrisField } from './DebrisField';
 import { GasCell, GasGrid } from './GasGrid';
 import { defaultMaterial } from './materials';
@@ -10,6 +10,21 @@ import { TileFlags, isLoadBearing, isSolid, isVoid } from './TileFlags';
 const LEAK_RATE_BAR = 0.05;
 const DEFAULT_GIRDER_MASS = 1;
 const PRESENT = TileFlags.FLOOR | TileFlags.BULKHEAD | TileFlags.GIRDER;
+
+/** Tank heat gained per second per unit of fire intensity in each neighbouring cell; a tank blows at 1. */
+export const TANK_HEAT_RATE = 0.25;
+/** Member capacity lost per second per unit of fire intensity beside it, down to `FIRE_MIN_CAPACITY` of new. */
+export const FIRE_WEAKEN = 0.04;
+export const FIRE_MIN_CAPACITY = 0.35;
+/** Explosion: pressure spike (bar) out to `BLAST_GAS_RADIUS`, fire out to `BLAST_FIRE_RADIUS`, members torn within `BLAST_TEAR_RADIUS` and weakened (to `BLAST_WEAKEN` of their capacity) within `BLAST_FIRE_RADIUS`, other tanks set off within `BLAST_CHAIN_RADIUS`. */
+export const BLAST_BAR = 3;
+export const BLAST_GAS_RADIUS = 2;
+export const BLAST_FIRE_RADIUS = 3;
+export const BLAST_TEAR_RADIUS = 1;
+export const BLAST_WEAKEN = 0.3;
+export const BLAST_CHAIN_RADIUS = 4;
+/** Explosions recorded per tick for the crew to feel. */
+export const MAX_BLASTS = 64;
 
 /**
  * Owns the tile map and keeps the gas and stress layers in sync with it.
@@ -28,6 +43,20 @@ export class World {
   readonly debris = new DebrisField();
   readonly salvage = new Salvage();
   tickCount = 0;
+  /** Heat per fuel-tank tile, 0..1; at 1 it explodes. */
+  readonly tankHeat = new Float32Array(CELL_COUNT);
+  /**
+   * Tank cells set off by a neighbouring blast or by fire, to explode next tick (a chain, one
+   * link per tick). Double-buffered: tanks going off this tick queue their neighbours into
+   * the other buffer, so they cannot overwrite entries still waiting their turn.
+   */
+  private fuses = new Int32Array(CELL_COUNT);
+  private fusesNow = new Int32Array(CELL_COUNT);
+  private fuseCount = 0;
+  /** Cells that exploded since the simulation last cleared them, and how many; explosions ever. */
+  readonly blasts = new Int32Array(MAX_BLASTS);
+  blastCount = 0;
+  explosionsTotal = 0;
   /** Set when a tile disappears, so the next tick looks for pieces that came loose. */
   private detachPending = false;
   private seenTopology = -1;
@@ -53,6 +82,10 @@ export class World {
     this.lattice.clear();
     this.debris.clear();
     this.salvage.clear();
+    this.tankHeat.fill(0);
+    this.fuseCount = 0;
+    this.blastCount = 0;
+    this.explosionsTotal = 0;
     this.detachPending = false;
     this.tickCount = 0;
   }
@@ -85,6 +118,11 @@ export class World {
    */
   cutTile(x: number, y: number): void {
     const flags = this.getTile(x, y);
+    if ((flags & TileFlags.FUEL) !== 0) {
+      // A torch through a fuel tank sets it off.
+      this.explode(y * this.width + x);
+      return;
+    }
     if ((flags & PRESENT) !== 0) this.salvage.destroyTile(this.material[y * this.width + x]);
     if (isSolid(flags)) this.setTile(x, y, this.bordersFloor(x, y) ? TileFlags.FLOOR : TileFlags.VOID);
     else if ((flags & TileFlags.FLOOR) !== 0) this.setTile(x, y, TileFlags.VOID);
@@ -113,8 +151,105 @@ export class World {
     return this.lattice.toggleAnchor(x, y);
   }
 
-  /** One fixed 50 ms tick. Allocation-free. */
+  /**
+   * A fuel tank at cell `i` blows: the tank is gone, the gas around it spikes, fire takes
+   * hold around it, members beside it tear and those nearby weaken, and every other tank in
+   * reach is set to go off next tick. Recorded in `blasts` for the crew to feel. A one-off
+   * event, not per-tick work.
+   */
+  explode(i: number): void {
+    if ((this.tiles[i] & TileFlags.FUEL) === 0) return;
+    const w = this.width;
+    const cx = i % w;
+    const cy = (i / w) | 0;
+    this.salvage.destroyTile(this.material[i]);
+    this.setTile(cx, cy, TileFlags.FLOOR);
+    this.tankHeat[i] = 0;
+    const gas = this.gas;
+    const L = this.lattice;
+    const r = BLAST_CHAIN_RADIUS;
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        const x = cx + dx;
+        const y = cy + dy;
+        if (!this.inBounds(x, y)) continue;
+        const j = y * w + x;
+        const d2 = dx * dx + dy * dy;
+        if (d2 <= BLAST_GAS_RADIUS * BLAST_GAS_RADIUS && gas.cells[j] === GasCell.OPEN && gas.current[j] < BLAST_BAR) {
+          gas.current[j] = BLAST_BAR;
+        }
+        if (d2 <= BLAST_FIRE_RADIUS * BLAST_FIRE_RADIUS) {
+          gas.ignite(j, 1 - Math.sqrt(d2) / (BLAST_FIRE_RADIUS + 1));
+          if (L.nodeActive[j] === 1) {
+            for (let k = 0; k < 4; k++) {
+              const e = L.edgeAdjacency[j * 4 + k];
+              if (e < 0) continue;
+              if (d2 <= BLAST_TEAR_RADIUS * BLAST_TEAR_RADIUS) L.snapEdge(e);
+              else L.edgeCapacity[e] *= BLAST_WEAKEN;
+            }
+          }
+        }
+        if (j !== i && (this.tiles[j] & TileFlags.FUEL) !== 0 && this.tankHeat[j] < 1) {
+          this.tankHeat[j] = 1;
+          this.fuses[this.fuseCount++] = j;
+        }
+      }
+    }
+    if (this.blastCount < MAX_BLASTS) this.blasts[this.blastCount++] = i;
+    this.explosionsTotal++;
+  }
+
+  /**
+   * Fire's effects on the structure: every burning cell heats the fuel tanks beside it
+   * (queuing those that reach 1 to blow) and softens the members beside it.
+   */
+  private heatFromFire(): void {
+    const gas = this.gas;
+    const list = gas.burningList;
+    const fire = gas.fire;
+    const tiles = this.tiles;
+    const heat = this.tankHeat;
+    const L = this.lattice;
+    const active = L.nodeActive;
+    const adj = L.edgeAdjacency;
+    const cap = L.edgeCapacity;
+    const floor = L.breakThreshold * FIRE_MIN_CAPACITY;
+    const w = this.width;
+    const dt = TICK_DT;
+    for (let k = 0; k < gas.burningCount; k++) {
+      const i = list[k];
+      const f = fire[i];
+      const x = i % w;
+      for (let d = 0; d < 4; d++) {
+        const j = d === 0 ? (x > 0 ? i - 1 : -1) : d === 1 ? (x < w - 1 ? i + 1 : -1) : d === 2 ? i - w : i + w;
+        if (j < 0 || j >= CELL_COUNT) continue;
+        if ((tiles[j] & TileFlags.FUEL) !== 0 && heat[j] < 1) {
+          heat[j] += f * TANK_HEAT_RATE * dt;
+          if (heat[j] >= 1) this.fuses[this.fuseCount++] = j;
+        }
+        if (active[j] === 1) {
+          for (let e4 = 0; e4 < 4; e4++) {
+            const e = adj[j * 4 + e4];
+            if (e < 0) continue;
+            const c = cap[e] * (1 - FIRE_WEAKEN * f * dt);
+            cap[e] = c > floor ? c : floor;
+          }
+        }
+      }
+    }
+  }
+
+  /** One fixed 50 ms tick. Allocation-free (explosions, rare events, aside). */
   tick(): void {
+    // Tanks primed last tick (by a blast or by fire) go off now. `blasts` collects every
+    // explosion (the player's torch can set one off between ticks) until the simulation has
+    // let the crew feel them and cleared it.
+    const lit = this.fuses;
+    const count = this.fuseCount;
+    this.fuses = this.fusesNow;
+    this.fusesNow = lit;
+    this.fuseCount = 0;
+    for (let k = 0; k < count; k++) this.explode(lit[k]);
     const tiles = this.tiles;
     // Inlined `GasGrid.addToxicGas`: a leak is often a single tile, so a call per leak would
     // stay cold, and V8's unoptimised tiers box every double they add.
@@ -129,6 +264,8 @@ export class World {
       }
     }
     this.gas.step();
+    this.gas.fireStep(TICK_DT);
+    if (this.gas.burningCount > 0) this.heatFromFire();
     const lattice = this.lattice;
     lattice.step();
     // Anything that lost its last path to an anchor tears free: after a snap or cut (the

@@ -5,6 +5,8 @@ export const TileFlags = {
   BULKHEAD: 0x04,
   GIRDER: 0x08,
   HAZARD_LEAK: 0x10,
+  /** A fuel tank (on a bulkhead tile): explodes when the torch cuts it or fire heats it. */
+  FUEL: 0x20,
 } as const;
 
 export type TileFlag = (typeof TileFlags)[keyof typeof TileFlags];

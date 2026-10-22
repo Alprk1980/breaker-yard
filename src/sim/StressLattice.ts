@@ -380,6 +380,15 @@ export class StressLattice {
     return Math.abs(this.edgeLoad[e]) / this.edgeCapacity[e];
   }
 
+  /** Snaps edge `e` outright (a blast tearing a member), if it is live. */
+  snapEdge(e: number): void {
+    if (e < 0 || this.edgeSnapped[e] === 1 || !this.isEdgeLive(e)) return;
+    this.edgeSnapped[e] = 1;
+    this.edgeLoad[e] = 0;
+    this.totalSnapped++;
+    this.topologyDirty = true;
+  }
+
   /** Marks every live edge whose load exceeds its capacity as snapped. Returns the count. */
   snapOverloaded(): number {
     let count = 0;

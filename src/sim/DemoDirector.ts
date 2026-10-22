@@ -3,7 +3,7 @@ import { B_X, B_Y, BODY_STRIDE, MAX_BODIES } from './DebrisField';
 import { MATERIAL_VALUE, Material } from './materials';
 import { PawnState } from './PawnManager';
 import { HazardKind } from './HazardLog';
-import { DEMO, buildDemoHull, seedDemoCrew, setRoomPressure, strandedCrewman } from './scenes';
+import { DEMO, addFuelTank, buildDemoHull, seedDemoCrew, setRoomPressure, strandedCrewman } from './scenes';
 import { type ShipBlueprint, buildShip, seedShipCrew } from './ships';
 import type { Simulation } from './Simulation';
 import { ToolKind } from './WorkOrderQueue';
@@ -56,7 +56,10 @@ export interface DemoSection {
  *                does the rest alone: severs it free, tows it to the barge, flies home.
  *   6. rescue    A crewman blown out of the open stern drifts away unconscious; a rescuer
  *                walks to the edge, flies out on suit thrusters and brings them back aboard.
- *   7. contract  The next ship from the generated fleet docks, with its contract on the banner.
+ *   7. fire      The torch hits a fuel tank: it blows, the blast sets off the tank beside it, fire
+ *                spreads through the cabin and the crew runs; a cut to space vents the cabin and
+ *                starves the fire out.
+ *   8. contract  The next ship from the generated fleet docks, with its contract on the banner.
  *
  * `restart()` plays them all in order and loops. `playSection(i)` loops one section on its
  * own: each section's `setup` builds what it needs from scratch (the deck section starts
@@ -185,6 +188,23 @@ export class DemoDirector {
         beats: [
           this.untilState('A crewman drifts out of the stern unconscious; a rescuer heads for the edge', PawnState.RESCUE_FLY, 20 * 40),
           this.untilRescued('The rescuer flies out on suit thrusters, grabs them and brings them back aboard', 20 * 90),
+        ],
+      },
+      {
+        id: 'fire',
+        title: 'Fire',
+        continues: false,
+        setup: () => {
+          fresh();
+          addFuelTank(this.sim.world, 70, 57, 2, 2);
+          addFuelTank(this.sim.world, 74, 57, 2, 2);
+        },
+        beats: [
+          this.wait('Two fuel tanks in the cabin, a cutting crew nearby', 40),
+          this.torch('The torch hits a fuel tank: it blows and sets off the one beside it', [70, 57]),
+          this.wait('Fire spreads through the cabin, burning its air; the crew runs from the flames', 20 * 8),
+          this.torch('Cutting the hull open to space', [hull.x1, 62, hull.x1, 64, hull.x1, 66]),
+          this.untilFireOut('Venting the cabin starves the fire', 20 * 60),
         ],
       },
       {
@@ -347,6 +367,20 @@ export class DemoDirector {
         this.cursorX = this.cursorY = -1;
       },
       tick: () => this.sim.world.debris.count > 0 || ++t >= timeout,
+    };
+  }
+
+  /** Waits, hands off, until nothing is burning (or `timeout` ticks pass). */
+  private untilFireOut(label: string, timeout: number): Beat {
+    let t = 0;
+    const gas = this.sim.world.gas;
+    return {
+      label,
+      start: () => {
+        t = 0;
+        this.cursorX = this.cursorY = -1;
+      },
+      tick: () => gas.burningCount === 0 || ++t >= timeout,
     };
   }
 

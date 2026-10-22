@@ -21,6 +21,10 @@ export const HazardKind = {
   DIED: 9,
   /** A rescuer brought a downed or stranded pawn to safety. */
   RESCUED: 10,
+  /** A fuel tank exploded (pawn -1). */
+  EXPLOSION: 11,
+  /** The order's tile is a fuel tank: crews will not put a torch to it. */
+  CUT_REFUSED_FUEL: 12,
 } as const;
 
 export const HAZARD_NAMES: readonly string[] = [
@@ -35,6 +39,8 @@ export const HAZARD_NAMES: readonly string[] = [
   'knocked out',
   'died',
   'rescued',
+  'explosion',
+  'cut refused: fuel tank',
 ];
 
 /**
