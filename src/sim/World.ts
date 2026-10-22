@@ -3,7 +3,7 @@ import { GasCell, GasGrid } from './GasGrid';
 import { StressLattice } from './StressLattice';
 import { TileFlags, isLoadBearing, isSolid, isVoid } from './TileFlags';
 
-/** Gas added per tick by a HAZARD_LEAK tile, in bar. */
+/** Toxic gas added per tick by a HAZARD_LEAK tile, in bar. */
 const LEAK_RATE_BAR = 0.05;
 const DEFAULT_GIRDER_MASS = 1;
 
@@ -84,7 +84,7 @@ export class World {
   tick(): void {
     const tiles = this.tiles;
     for (let i = 0; i < CELL_COUNT; i++) {
-      if ((tiles[i] & TileFlags.HAZARD_LEAK) !== 0) this.gas.addPressure(i, LEAK_RATE_BAR);
+      if ((tiles[i] & TileFlags.HAZARD_LEAK) !== 0) this.gas.addToxicGas(i, LEAK_RATE_BAR);
     }
     this.gas.step();
     this.lattice.step();

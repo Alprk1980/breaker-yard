@@ -1,6 +1,9 @@
 import { getHeapSpaceStatistics } from 'node:v8';
 import { describe, expect, it } from 'vitest';
-import { DEMO, buildDemoHull, warmUpKernels } from './scenes';
+import { HazardKind } from './HazardLog';
+import { DEMO, buildDemoHull, seedDemoCrew, setRoomPressure, warmUpCrew, warmUpKernels } from './scenes';
+import { Simulation } from './Simulation';
+import { ToolKind } from './WorkOrderQueue';
 import { World } from './World';
 
 declare const gc: (() => void) | undefined;
@@ -10,11 +13,11 @@ function newSpaceUsed(): number {
   throw new Error('new_space not reported');
 }
 
-/** Young-generation bytes allocated while running `ticks` world ticks. */
-function bytesAllocatedDuring(world: World, ticks: number): number {
+/** Young-generation bytes allocated while running `ticks` world (or full simulation) ticks. */
+function bytesAllocatedDuring(sim: { tick(): void }, ticks: number): number {
   gc?.();
   const before = newSpaceUsed();
-  for (let t = 0; t < ticks; t++) world.tick();
+  for (let t = 0; t < ticks; t++) sim.tick();
   return newSpaceUsed() - before;
 }
 
@@ -51,4 +54,62 @@ describe('tick loop allocations', () => {
     expect(venting / TICKS).toBeLessThan(MAX_BYTES_PER_TICK);
     expect(snapping / TICKS).toBeLessThan(MAX_BYTES_PER_TICK);
   });
+
+  it('allocates nothing per tick with pawns pathing, cutting, refusing and fleeing', { timeout: 90_000 }, () => {
+    warmUpKernels(new World());
+    warmUpCrew(new Simulation());
+    // Pawn states are individually cold (one pawn refuses a cut now and then), so V8 tiers
+    // them up late. Run the scenario once unmeasured, then measure an identical second run:
+    // whatever is left is per-tick garbage, not JIT warm-up.
+    crewScenario(new Simulation(), null);
+    crewScenario(new Simulation(), null);
+    const bytes = new Float64Array(3);
+    const sim = crewScenario(new Simulation(), bytes);
+    const [working, refusing, fleeing] = bytes;
+
+    expect(sim.orders.count).toBeLessThan(13);
+    expect(sim.hazards.countOf(HazardKind.CUT_REFUSED_PRESSURE)).toBeGreaterThan(0);
+    expect(sim.hazards.countOf(HazardKind.DECOMPRESSION)).toBeGreaterThan(0);
+
+    console.log(`new-space bytes over ${TICKS} sim ticks: working=${working} refusing=${refusing} fleeing=${fleeing}`);
+    expect(working / TICKS).toBeLessThan(MAX_BYTES_PER_TICK);
+    expect(refusing / TICKS).toBeLessThan(MAX_BYTES_PER_TICK);
+    expect(fleeing / TICKS).toBeLessThan(MAX_BYTES_PER_TICK);
+  });
 });
+
+/**
+ * Demo crew cutting interior bulkheads, then refusing frame cuts in a 5 bar room, then
+ * caught by a breach. Writes the bytes allocated in each phase into `out` when given.
+ */
+function crewScenario(sim: Simulation, out: Float64Array | null): Simulation {
+  const { world, orders, pawns } = sim;
+  const run = (phase: number): void => {
+    if (out) out[phase] = bytesAllocatedDuring(sim, TICKS);
+    else for (let t = 0; t < TICKS; t++) sim.tick();
+  };
+  buildDemoHull(world);
+  seedDemoCrew(sim);
+  for (let t = 0; t < 200; t++) sim.tick();
+
+  // Pathing and cutting interior bulkheads.
+  const lockX = DEMO.hull.x0 + 7;
+  for (let y = 52; y < 62; y++) orders.addOrder(lockX, y, 3, ToolKind.CUTTER);
+  run(0);
+
+  // A 5 bar room against vacuum: every frame order is refused.
+  setRoomPressure(world, 5);
+  orders.addOrder(66, DEMO.hull.y0, 5, ToolKind.HEAVY_CUTTER);
+  orders.addOrder(70, DEMO.hull.y1, 5, ToolKind.HEAVY_CUTTER);
+  run(1);
+
+  // Breach next to the crew: drag, fleeing, refuge search, clamping.
+  for (let p = 0; p < pawns.capacity; p++) {
+    if (pawns.alive[p] === 0) continue;
+    pawns.pos[p * 2] = DEMO.hull.x1 - 1.5;
+    pawns.pos[p * 2 + 1] = 64.5;
+  }
+  world.cutTile(DEMO.hull.x1, 64);
+  run(2);
+  return sim;
+}
