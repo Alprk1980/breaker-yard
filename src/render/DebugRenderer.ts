@@ -2,7 +2,7 @@ import { INJECT_PRESSURE_BAR } from '../sim/constants';
 import { B_COS, B_SIN, B_X, B_Y, BODY_STRIDE, MAX_BODIES } from '../sim/DebrisField';
 import type { DemoDirector } from '../sim/DemoDirector';
 import { MATERIAL_COLORS, MATERIAL_COUNT } from '../sim/materials';
-import { MAX_PATH, PAWN_STATE_NAMES, PAWN_WARNING_BITS, PawnState, PawnWarning } from '../sim/PawnManager';
+import { MAX_HEALTH, MAX_PATH, PAWN_STATE_NAMES, PAWN_WARNING_BITS, PawnState, PawnWarning, SUIT_O2 } from '../sim/PawnManager';
 import type { Simulation } from '../sim/Simulation';
 import { TileFlags, isLoadBearing, isSolid } from '../sim/TileFlags';
 import { OrderKind, PRIORITY_DEFAULT, ToolKind } from '../sim/WorkOrderQueue';
@@ -64,7 +64,14 @@ const PAWN_COLORS: readonly string[] = [
   '#a78bfa', // approaching a chunk
   '#34d399', // tugging
   '#22d3ee', // returning
+  '#64748b', // down
+  '#f0abfc', // rescue: going
+  '#e879f9', // rescue: flying out
+  '#d946ef', // rescue: carrying
 ];
+const COLOR_HEALTH = '#ef4444';
+const COLOR_AIR = '#38bdf8';
+const COLOR_BAR_BACK = 'rgba(15, 23, 42, 0.8)';
 /** Smallest pawn radius in pixels, so the crew stays visible zoomed out. */
 const MIN_PAWN_RADIUS = 6;
 /** Zoom (pixels per tile) at which every pawn gets a status label, not just the selected one. */
@@ -531,6 +538,21 @@ export class DebugRenderer {
       ctx.moveTo(sx, sy);
       ctx.lineTo((sx + P.heading[p * 2] * nose) | 0, (sy + P.heading[p * 2 + 1] * nose) | 0);
       ctx.stroke();
+
+      // Vitals: health and suit air under the pawn, shown once either is below full.
+      const hp = P.health[p];
+      const air = P.oxygen[p];
+      if (hp < MAX_HEALTH || air < SUIT_O2) {
+        const bw = r * 2;
+        const bx = sx - r;
+        const by = sy + r + 2;
+        ctx.fillStyle = COLOR_BAR_BACK;
+        ctx.fillRect(bx - 1, by - 1, bw + 2, 6);
+        ctx.fillStyle = COLOR_HEALTH;
+        ctx.fillRect(bx, by, hp > 0 ? ((hp * bw) / MAX_HEALTH) | 0 : 0, 2);
+        ctx.fillStyle = COLOR_AIR;
+        ctx.fillRect(bx, by + 2, ((air * bw) / SUIT_O2) | 0, 2);
+      }
 
       const selected = p === this.selectedPawn;
       if (selected) {

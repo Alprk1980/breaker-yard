@@ -159,6 +159,32 @@ export function looseDeckPatch(world: World): number {
   return b;
 }
 
+/**
+ * A vented demo hull with its stern cut open, the demo crew aboard, and one more crewman
+ * knocked out and drifting away outside the hole. Returns that crewman. Used by the demo,
+ * warm-up and tests.
+ */
+export function strandedCrewman(sim: Simulation): number {
+  const world = sim.world;
+  buildDemoHull(world);
+  setRoomPressure(world, 0);
+  for (let y = 60; y <= 68; y++) {
+    world.cutTile(DEMO.engine.x, y);
+    world.cutTile(DEMO.engine.x, y);
+  }
+  sim.resetCrew();
+  seedDemoCrew(sim);
+  const v = sim.pawns.spawn(DEMO.engine.x - 1, 64);
+  if (v < 0) return -1;
+  sim.pawns.pos[v * 2] = DEMO.engine.x + 6.5;
+  sim.pawns.pos[v * 2 + 1] = 64.5;
+  sim.pawns.vel[v * 2] = 0.4;
+  sim.pawns.vel[v * 2 + 1] = 0.1;
+  // Knocked out (healing would lift exactly 0 straight back up).
+  sim.pawns.health[v] = -5;
+  return v;
+}
+
 /** Spawns the demo crew inside the main room. */
 export function seedDemoCrew(sim: Simulation): void {
   for (const [x, y] of DEMO.crew) sim.pawns.spawn(x, y);
@@ -166,9 +192,9 @@ export function seedDemoCrew(sim: Simulation): void {
 
 /**
  * Like `warmUpKernels`, for the crew: a full 32-pawn crew runs through navigating,
- * cutting, refused high-pressure cuts, a breach, drag, fleeing, riding a torn-off hull and
- * hauling a loose chunk to a bin on a throwaway simulation, several times over, then it is
- * cleared. Pawn code paths are individually
+ * cutting, refused high-pressure cuts, a breach, drag, fleeing, riding a torn-off hull,
+ * hauling a loose chunk to a bin, and a space rescue on a throwaway simulation, several times
+ * over, then it is cleared. Pawn code paths are individually
  * cold (one pawn flees now and then), so V8 only optimises them with a big crew; until
  * then they run in the interpreter, which boxes every double.
  */
@@ -209,6 +235,9 @@ export function warmUpCrew(sim: Simulation, cycles = 3, ticksPerPhase = 300): vo
     for (let k = 0; k < 4; k++) pawns.spawn(74, 60 + k * 2);
     looseDeckPatch(world);
     for (let t = 0; t < ticksPerPhase * 2; t++) sim.tick();
+    // A crewman blown out unconscious, flown out to and carried back aboard.
+    strandedCrewman(sim);
+    for (let t = 0; t < ticksPerPhase * 3; t++) sim.tick();
   }
   world.clear();
   sim.resetCrew();

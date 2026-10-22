@@ -30,6 +30,10 @@ export const PATH_TOO_LONG = -2;
 const OPEN = GasCell.OPEN;
 const WALL = GasCell.WALL;
 
+/** Pressure a suit can top its air up from, in bar (with toxin under `BREATHABLE_TOXIN_BAR`). */
+export const BREATHABLE_BAR = 0.6;
+export const BREATHABLE_TOXIN_BAR = 0.2;
+
 const DIAG_NUM = 14;
 const DIAG_DEN = 10;
 
@@ -42,7 +46,12 @@ const DIAG_DEN = 10;
  *     structural member above 80% utilisation (where a snap would land on them).
  * Allocation-free; reads the gas and stress layers, owns nothing in them.
  */
-export function updateCostGrid(gasGrid: GasGrid, stressLattice: StressLattice, cost: Uint16Array): void {
+export function updateCostGrid(
+  gasGrid: GasGrid,
+  stressLattice: StressLattice,
+  cost: Uint16Array,
+  breathable: Uint8Array | null = null,
+): void {
   const w = gasGrid.width;
   const h = gasGrid.height;
   const cells = gasGrid.cells;
@@ -55,8 +64,10 @@ export function updateCostGrid(gasGrid: GasGrid, stressLattice: StressLattice, c
       const i = row + x;
       if (cells[i] !== OPEN) {
         cost[i] = COST_IMPASSABLE;
+        if (breathable !== null) breathable[i] = 0;
         continue;
       }
+      if (breathable !== null) breathable[i] = p[i] >= BREATHABLE_BAR && tox[i] < BREATHABLE_TOXIN_BAR ? 1 : 0;
       // Inline getPressureDelta: the cell is OPEN, so it is always one of the samples.
       const pi = p[i];
       let lo = pi;
@@ -146,6 +157,11 @@ export class PathGrid {
   readonly cellCount: number;
   /** Traversal cost per tile; 0xFFFF is impassable. */
   readonly cost: Uint16Array;
+  /**
+   * 1 where a suit can refill its air (deck at `BREATHABLE_BAR` or more, little toxin), else 0.
+   * Kept here, refreshed with the costs, so rescuers can look for air without reading floats.
+   */
+  readonly breathable: Uint8Array;
 
   /** Nodes expanded by the most recent search. */
   lastExpanded = 0;
@@ -168,6 +184,7 @@ export class PathGrid {
     this.cellCount = width * height;
     const n = this.cellCount;
     this.cost = new Uint16Array(n).fill(COST_IMPASSABLE);
+    this.breathable = new Uint8Array(n);
     this.g = new Uint32Array(n);
     this.f = new Uint32Array(n);
     this.parent = new Int32Array(n);
@@ -179,7 +196,7 @@ export class PathGrid {
 
   /** Recomputes `cost` from the gas and stress layers. */
   updateCostGrid(gasGrid: GasGrid, stressLattice: StressLattice): void {
-    updateCostGrid(gasGrid, stressLattice, this.cost);
+    updateCostGrid(gasGrid, stressLattice, this.cost, this.breathable);
   }
 
   inBounds(x: number, y: number): boolean {

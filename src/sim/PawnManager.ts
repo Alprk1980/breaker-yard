@@ -1,8 +1,8 @@
-import { HAUL_LANE_X } from './constants';
+import { HAUL_LANE_X, HEIGHT, WIDTH } from './constants';
 import { B_COS, B_MASS, B_SIN, B_SPIN, B_VX, B_VY, B_X, B_Y, BODY_STRIDE, MAX_BODIES } from './DebrisField';
 import { GasCell, type Vec2 } from './GasGrid';
 import { HazardKind, type HazardLog } from './HazardLog';
-import { COST_IMPASSABLE, type PathGrid } from './PathGrid';
+import { BREATHABLE_BAR, BREATHABLE_TOXIN_BAR, COST_IMPASSABLE, type PathGrid } from './PathGrid';
 import { TileFlags, isSolid } from './TileFlags';
 import { OrderKind, ToolKind, type WorkOrderQueue } from './WorkOrderQueue';
 import type { World } from './World';
@@ -23,6 +23,14 @@ export const PawnState = {
   TUGGING: 6,
   /** Flying back to the ship after a tow. */
   RETURNING: 7,
+  /** Out of health: helpless until healed, or rescued, or dead. */
+  DOWN: 8,
+  /** Heading for a downed or stranded pawn (walking, or to the deck edge to fly out). */
+  RESCUE_GO: 9,
+  /** Flying out on thrusters to grab a pawn adrift in space. */
+  RESCUE_FLY: 10,
+  /** Carrying a pawn to breathable air, or at least back aboard. */
+  RESCUE_CARRY: 11,
 } as const;
 
 export const PAWN_STATE_NAMES: readonly string[] = [
@@ -34,6 +42,10 @@ export const PAWN_STATE_NAMES: readonly string[] = [
   'APPROACHING',
   'TUGGING',
   'RETURNING',
+  'DOWN',
+  'RESCUE_GO',
+  'RESCUE_FLY',
+  'RESCUE_CARRY',
 ];
 
 /** Kinds of work a pawn can be given a priority for. */
@@ -42,13 +54,51 @@ export const JobKind = {
   CUT: 0,
   /** Towing loose chunks to the bin that pays most for them. */
   HAUL: 1,
+  /** Fetching downed and stranded crew back to air. Tried before other jobs of the same priority. */
+  RESCUE: 2,
 } as const;
-export const JOB_KINDS = 2;
-export const JOB_NAMES: readonly string[] = ['cut', 'haul'];
+export const JOB_KINDS = 3;
+export const JOB_NAMES: readonly string[] = ['cut', 'haul', 'rescue'];
 /** Job priorities run 1 (done first) to 4 (done last); 0 means never. */
 export const JOB_PRIORITY_LOWEST = 4;
-/** New pawns cut first and haul when there is nothing to cut. */
-export const DEFAULT_JOB_PRIORITY: readonly number[] = [1, 2];
+/** New pawns rescue and cut first, and haul when there is nothing else. */
+export const DEFAULT_JOB_PRIORITY: readonly number[] = [1, 2, 1];
+
+/** Suit air, in seconds of breathing. */
+export const SUIT_O2 = 180;
+/** Air refilled per second in breathable air; drawn per second elsewhere, faster with a breached suit. */
+export const O2_REFILL = 20;
+export const O2_DRAIN = 1;
+export const O2_DRAIN_BREACHED = 3;
+/** Suit integrity (0-100) below which the suit is breached. */
+export const SUIT_BREACH = 50;
+/** Suit integrity lost per second per bar of toxin: the gas eats the seals. */
+export const TOXIC_SUIT_DAMAGE = 3;
+export const MAX_HEALTH = 100;
+/** Health lost per second with no air, and regained per second while there is air. */
+export const SUFFOCATION_DAMAGE = 8;
+export const HEAL_RATE = 2;
+/** A downed pawn gets up at this health; keeps losing health while down and dies at `DEATH_HEALTH`. */
+export const WAKE_HEALTH = 30;
+export const DEATH_HEALTH = -50;
+/** Hitting a wall faster than this (tiles/s) hurts: `IMPACT_DAMAGE` health per tile/s over, half that to the suit. */
+export const IMPACT_SPEED = 5;
+export const IMPACT_DAMAGE = 8;
+/** Adrift with no deck in reach for this many ticks: stranded, and someone should come. */
+export const STRANDED_TICKS = 60;
+/** Flying on thrusters: top speed (tiles/s), and the speed per tile of distance when braking in. */
+export const MAX_FLY_SPEED = 4;
+export const ARRIVE_GAIN = 1.5;
+/** How hard thrusters correct toward the wanted velocity (1/s), capped at `THRUSTER_ACCEL`. */
+export const STEER_GAIN = 3;
+/** How far a rescuer looks for breathable deck, and for a deck edge to fly out from, in tiles. */
+export const SAFE_SEARCH_TILES = 1200;
+export const LAUNCH_SEARCH_RADIUS = 24;
+/**
+ * A downed pawn set down somewhere without breathable air (because none was in reach) is
+ * left this long before anyone tries again, rather than being picked up over and over.
+ */
+export const RESCUE_RETRY_TICKS = 600;
 
 /** A hauler's thruster force limit, mass * tiles/s^2 (the player's grapple has 150). */
 export const TUG_FORCE = 60;
@@ -148,6 +198,11 @@ const FLEEING = PawnState.FLEEING;
 const APPROACHING = PawnState.APPROACHING;
 const TUGGING = PawnState.TUGGING;
 const RETURNING = PawnState.RETURNING;
+const DOWN = PawnState.DOWN;
+const RESCUE_GO = PawnState.RESCUE_GO;
+const RESCUE_FLY = PawnState.RESCUE_FLY;
+const RESCUE_CARRY = PawnState.RESCUE_CARRY;
+const JOB_RESCUE = JobKind.RESCUE;
 const JOB_CUT = JobKind.CUT;
 const JOB_HAUL = JobKind.HAUL;
 const SEVER = OrderKind.SEVER;
@@ -167,6 +222,9 @@ const H_ADRIFT = HazardKind.ADRIFT;
 const H_UNREACHABLE = HazardKind.UNREACHABLE;
 const H_CARRIED_OFF = HazardKind.CARRIED_OFF;
 const H_HAUL_ABANDONED = HazardKind.HAUL_ABANDONED;
+const H_KNOCKED_OUT = HazardKind.KNOCKED_OUT;
+const H_DIED = HazardKind.DIED;
+const H_RESCUED = HazardKind.RESCUED;
 const OPEN = GasCell.OPEN;
 const WALL = GasCell.WALL;
 const HEAVY_CUTTER = ToolKind.HEAVY_CUTTER;
@@ -245,6 +303,30 @@ export class PawnManager {
   readonly stuckCount = new Uint8Array(MAX_PAWNS);
   /** Pawn hauling each debris body, or -1. */
   readonly bodyHauler = new Int8Array(MAX_BODIES).fill(-1);
+  /** Seconds of suit air, suit integrity (0-100) and health (`MAX_HEALTH` down to `DEATH_HEALTH`). */
+  readonly oxygen = new Float32Array(MAX_PAWNS);
+  readonly suit = new Float32Array(MAX_PAWNS);
+  readonly health = new Float32Array(MAX_PAWNS);
+  /** Tile index the pawn is on, refreshed every tick, for integer-only callers. */
+  readonly cellOf = new Int32Array(MAX_PAWNS);
+  /** Ticks adrift with no deck to thrust for. */
+  readonly strandedTicks = new Uint16Array(MAX_PAWNS);
+  /** 1 while the pawn is stranded, or down out of breathable air, and nobody is carrying it. */
+  readonly needy = new Uint8Array(MAX_PAWNS);
+  /** Ticks before a downed pawn set down without air counts as needing rescue again. */
+  readonly rescueWait = new Uint16Array(MAX_PAWNS);
+  /** The pawn carrying this one, or -1. */
+  readonly carriedBy = new Int8Array(MAX_PAWNS).fill(-1);
+  /** The pawn coming to rescue this one, or -1. */
+  readonly rescuer = new Int8Array(MAX_PAWNS).fill(-1);
+  /** The pawn this one is rescuing, or -1; whether it has to fly out for them; whether the carry route is set. */
+  readonly rescueTarget = new Int8Array(MAX_PAWNS).fill(-1);
+  readonly rescueFly = new Uint8Array(MAX_PAWNS);
+  readonly carryPlanned = new Uint8Array(MAX_PAWNS);
+  /** Breadth-first search scratch for finding breathable deck. */
+  private readonly bfsQueue = new Int32Array(SAFE_SEARCH_TILES);
+  private readonly bfsSeen = new Uint32Array(WIDTH * HEIGHT);
+  private bfsStamp = 0;
   count = 0;
 
   private readonly scalars = new Float64Array(4);
@@ -288,6 +370,16 @@ export class PawnManager {
     this.rideRole[p] = ROLE_PASSENGER;
     this.haulBody[p] = -1;
     this.home[p] = -1;
+    this.oxygen[p] = SUIT_O2;
+    this.suit[p] = 100;
+    this.health[p] = MAX_HEALTH;
+    this.cellOf[p] = y * this.world.width + x;
+    this.strandedTicks[p] = 0;
+    this.needy[p] = 0;
+    this.rescueWait[p] = 0;
+    this.carriedBy[p] = -1;
+    this.rescuer[p] = -1;
+    this.rescueTarget[p] = -1;
     for (let k = 0; k < JOB_KINDS; k++) this.jobPriority[p * JOB_KINDS + k] = DEFAULT_JOB_PRIORITY[k];
     this.count++;
     return p;
@@ -297,6 +389,16 @@ export class PawnManager {
     if (this.alive[p] === 0) return;
     this.dropOrder(p, 0);
     this.releaseHaul(p);
+    this.endRescue(p);
+    // Anyone this pawn was carrying, or was coming for, is let go.
+    for (let q = 0; q < MAX_PAWNS; q++) {
+      if (this.carriedBy[q] === p) this.carriedBy[q] = -1;
+      if (this.rescuer[q] === p) this.rescuer[q] = -1;
+    }
+    if (this.rescuer[p] >= 0) this.rescueTarget[this.rescuer[p]] = -1;
+    this.rescuer[p] = -1;
+    this.carriedBy[p] = -1;
+    this.ride[p] = -1;
     this.alive[p] = 0;
     this.count--;
   }
@@ -305,6 +407,10 @@ export class PawnManager {
     this.alive.fill(0);
     this.orderSlot.fill(-1);
     this.bodyHauler.fill(-1);
+    this.carriedBy.fill(-1);
+    this.rescuer.fill(-1);
+    this.rescueTarget.fill(-1);
+    this.needy.fill(0);
     this.count = 0;
   }
 
@@ -388,6 +494,45 @@ export class PawnManager {
     const pos = this.pos;
     const vel = this.vel;
 
+    // --- Needs: suit air, suit integrity, health ---
+    const nw = world.width;
+    const ni = Math.floor(pos[p * 2 + 1]) * nw + Math.floor(pos[p * 2]);
+    const open = gas.cells[ni] === OPEN;
+    const press = open ? gas.current[ni] : 0;
+    const toxBar = open ? gas.toxin[ni] : 0;
+    const breathable = press >= BREATHABLE_BAR && toxBar < BREATHABLE_TOXIN_BAR;
+    const o2Rate = breathable ? O2_REFILL : this.suit[p] < SUIT_BREACH ? -O2_DRAIN_BREACHED : -O2_DRAIN;
+    const o2Raw = this.oxygen[p] + o2Rate * dt;
+    const o2 = o2Raw > SUIT_O2 ? SUIT_O2 : o2Raw < 0 ? 0 : o2Raw;
+    this.oxygen[p] = o2;
+    const suitRaw = this.suit[p] - toxBar * TOXIC_SUIT_DAMAGE * dt;
+    this.suit[p] = suitRaw < 0 ? 0 : suitRaw;
+    const hpRaw = this.health[p] + (o2 <= 0 ? -SUFFOCATION_DAMAGE : HEAL_RATE) * dt;
+    const hp = hpRaw > MAX_HEALTH ? MAX_HEALTH : hpRaw;
+    this.health[p] = hp;
+    this.cellOf[p] = ni;
+    if (hp <= DEATH_HEALTH) {
+      this.die(p);
+      return;
+    }
+    if (hp <= 0 && this.state[p] !== DOWN) this.knockOut(p);
+
+    // --- Being carried by a rescuer: held at their side ---
+    const carrier = this.carriedBy[p];
+    if (carrier >= 0) {
+      if (this.alive[carrier] === 1 && this.state[carrier] === RESCUE_CARRY) {
+        pos[p * 2] = pos[carrier * 2];
+        pos[p * 2 + 1] = pos[carrier * 2 + 1];
+        vel[p * 2] = vel[carrier * 2];
+        vel[p * 2 + 1] = vel[carrier * 2 + 1];
+        this.magBoot[p] = 0;
+        this.needy[p] = 0;
+        this.strandedTicks[p] = 0;
+        return;
+      }
+      this.carriedBy[p] = -1;
+    }
+
     // --- Riding a wreck: carried rigidly with it, doing nothing else ---
     const ride = this.ride[p];
     if (ride >= 0) {
@@ -443,21 +588,31 @@ export class PawnManager {
     let tx = Math.floor(pos[p * 2]);
     let ty = Math.floor(pos[p * 2 + 1]);
     const onFloor = gas.cells[ty * w + tx] === OPEN;
+    // A rescuer launching off the deck lets go of it on purpose.
+    const booted = onFloor && this.state[p] !== RESCUE_FLY;
     const imp = gas.getVentImpulse(tx, ty, this.impulse);
     const impMag = Math.sqrt(imp.x * imp.x + imp.y * imp.y);
     const f = impMag * DRAG_GAIN;
     // Booted pawns only feel the drag their grip cannot absorb, and friction bleeds off speed.
-    const slip = onFloor ? (f > MAGBOOT_GRIP ? 1 - MAGBOOT_GRIP / f : 0) : 1;
+    const slip = booted ? (f > MAGBOOT_GRIP ? 1 - MAGBOOT_GRIP / f : 0) : 1;
     const friction = 1 - BOOT_FRICTION * dt;
-    const damp = onFloor ? (friction > 0 ? friction : 0) : 1;
-    // Adrift with a floor in reach: thrusters push toward it.
-    const anchor = onFloor ? -1 : this.anchor[p];
+    const damp = booted ? (friction > 0 ? friction : 0) : 1;
+    // Off the deck with somewhere to go (a deck in reach, home, a pawn to fetch): thrusters
+    // steer toward the speed wanted there, which falls off on the way in so the pawn arrives
+    // rather than slams in. A downed pawn has no one at the controls.
+    const anchor = booted || this.state[p] === DOWN ? -1 : this.anchor[p];
     const adx = anchor >= 0 ? (anchor % w) + 0.5 - pos[p * 2] : 0;
     const ady = anchor >= 0 ? ((anchor / w) | 0) + 0.5 - pos[p * 2 + 1] : 0;
     const ad = Math.sqrt(adx * adx + ady * ady);
-    const thrust = ad > 1e-4 ? THRUSTER_ACCEL / ad : 0;
-    const ax = imp.x * DRAG_GAIN * slip + adx * thrust;
-    const ay = imp.y * DRAG_GAIN * slip + ady * thrust;
+    const want = ad * ARRIVE_GAIN < MAX_FLY_SPEED ? ad * ARRIVE_GAIN : MAX_FLY_SPEED;
+    const wk = ad > 1e-4 ? want / ad : 0;
+    const dvx = adx * wk - vel[p * 2];
+    const dvy = ady * wk - vel[p * 2 + 1];
+    const dvm = Math.sqrt(dvx * dvx + dvy * dvy);
+    const steer = anchor < 0 || dvm < 1e-4 ? 0 : dvm * STEER_GAIN < THRUSTER_ACCEL ? STEER_GAIN : THRUSTER_ACCEL / dvm;
+    const thrust = anchor >= 0 && ad > 1e-4 ? 1 : 0;
+    const ax = imp.x * DRAG_GAIN * slip + dvx * steer;
+    const ay = imp.y * DRAG_GAIN * slip + dvy * steer;
     // A pawn clamped to its anchor sits at the tile centre and holds still whatever the stream does.
     const clamped = this.clamp[p] === 1;
     const rawVx = vel[p * 2] * damp + ax * dt;
@@ -472,10 +627,17 @@ export class PawnManager {
     pos[p * 2 + 1] = clamped ? ty + 0.5 : pos[p * 2 + 1];
     heading[p * 2] = thrust > 0 ? adx / ad : heading[p * 2];
     heading[p * 2 + 1] = thrust > 0 ? ady / ad : heading[p * 2 + 1];
-    this.magBoot[p] = onFloor ? 1 : 0;
+    this.magBoot[p] = booted ? 1 : 0;
     sc[S_MOVE_X] = vx * dt;
     sc[S_MOVE_Y] = vy * dt;
     this.move(p);
+    // Impact: `move` stops a pawn dead at a wall. Hitting one fast hurts, and dents the suit.
+    const hitX = vx !== 0 && vel[p * 2] === 0 ? (vx < 0 ? -vx : vx) : 0;
+    const hitY = vy !== 0 && vel[p * 2 + 1] === 0 ? (vy < 0 ? -vy : vy) : 0;
+    const hit = hitX > hitY ? hitX : hitY;
+    const blow = hit > IMPACT_SPEED ? (hit - IMPACT_SPEED) * IMPACT_DAMAGE : 0;
+    this.health[p] -= blow;
+    this.suit[p] = this.suit[p] - blow * 0.5 > 0 ? this.suit[p] - blow * 0.5 : 0;
 
     tx = Math.floor(pos[p * 2]);
     ty = Math.floor(pos[p * 2 + 1]);
@@ -488,9 +650,24 @@ export class PawnManager {
       (this.stressNear(tx, ty) ? W_STRESS : 0);
     this.warnings[p] = (this.warnings[p] & W_PRESSURE) | live;
 
+    // Stranded: adrift with nothing to thrust for. Needy: down or stranded, and loose.
+    const st = this.state[p];
+    const adrift = !onFloor && this.anchor[p] < 0 && st !== RESCUE_FLY && st !== RESCUE_CARRY && st !== RETURNING;
+    const sTicks = adrift ? this.strandedTicks[p] + 1 : 0;
+    this.strandedTicks[p] = sTicks > 0xffff ? 0xffff : sTicks;
+    const wait = this.rescueWait[p];
+    this.rescueWait[p] = wait > 0 ? wait - 1 : 0;
+    this.needy[p] = sTicks >= STRANDED_TICKS || (st === DOWN && !breathable && wait === 0) ? 1 : 0;
+    this.cellOf[p] = ty * w + tx;
+    if (st === DOWN) {
+      if (this.health[p] >= WAKE_HEALTH) this.wake(p);
+      return;
+    }
+
     const vt = impMag > FLEE_IMPULSE ? this.ventTicks[p] + 1 : 0;
     this.ventTicks[p] = vt > 255 ? 255 : vt;
-    if (this.state[p] !== FLEEING && this.state[p] !== RETURNING && (vt >= FLEE_CONFIRM_TICKS || !onFloor)) {
+    const flying = st === RETURNING || st === RESCUE_FLY || st === RESCUE_CARRY;
+    if (st !== FLEEING && !flying && (vt >= FLEE_CONFIRM_TICKS || !onFloor)) {
       sc[S_IMPULSE] = impMag;
       this.startFleeing(p, onFloor ? H_DECOMPRESSION : H_ADRIFT, tx, ty);
     }
@@ -518,11 +695,22 @@ export class PawnManager {
       case RETURNING:
         this.tickReturning(p, tx, ty);
         break;
+      case RESCUE_GO:
+        this.tickRescueGo(p, tx, ty);
+        break;
+      case RESCUE_FLY:
+        this.tickRescueFly(p);
+        break;
+      case RESCUE_CARRY:
+        this.tickRescueCarry(p, tx, ty);
+        break;
     }
 
     // --- Motion and work for the state just decided ---
     const state = this.state[p];
-    if ((state === NAVIGATING || state === FLEEING || state === APPROACHING) && this.clamp[p] === 0) {
+    const walking =
+      state === NAVIGATING || state === FLEEING || state === APPROACHING || state === RESCUE_GO || (state === RESCUE_CARRY && onFloor);
+    if (walking && this.clamp[p] === 0) {
       // Walk along the path; several waypoints can be passed in one tick.
       let budget = (state === FLEEING ? FLEE_SPEED : WALK_SPEED) * dt;
       const base = p * MAX_PATH;
@@ -572,13 +760,264 @@ export class PawnManager {
     }
   }
 
-  /** Tries each job kind in priority order (1 first) and takes the first that has work. */
+  /** Tries each job kind in priority order (1 first; rescue before the rest) and takes the first that has work. */
   private tickIdle(p: number, tx: number, ty: number): void {
     const base = p * JOB_KINDS;
     for (let level = 1; level <= JOB_PRIORITY_LOWEST; level++) {
+      if (this.jobPriority[base + JOB_RESCUE] === level && this.tryRescue(p, tx, ty)) return;
       if (this.jobPriority[base + JOB_CUT] === level && this.tryCut(p, tx, ty)) return;
       if (this.jobPriority[base + JOB_HAUL] === level && this.tryHaul(p, tx, ty)) return;
     }
+  }
+
+  // --- Survival -------------------------------------------------------------------------
+
+  /** Health ran out: drop everything and go down where you are. */
+  private knockOut(p: number): void {
+    this.hazards.log(H_KNOCKED_OUT, p, this.cellOf[p] % this.world.width, (this.cellOf[p] / this.world.width) | 0, this.world.tickCount, 0);
+    this.dropOrder(p, 0);
+    this.releaseHaul(p);
+    this.endRescue(p);
+    // A tug that blacks out stays aboard as a passenger.
+    this.rideRole[p] = ROLE_PASSENGER;
+    this.state[p] = DOWN;
+    this.clamp[p] = 0;
+    this.anchor[p] = -1;
+    this.pathLen[p] = 0;
+  }
+
+  private wake(p: number): void {
+    this.state[p] = IDLE;
+    this.pathLen[p] = 0;
+    this.needy[p] = 0;
+  }
+
+  private die(p: number): void {
+    const w = this.world.width;
+    this.hazards.log(H_DIED, p, this.cellOf[p] % w, (this.cellOf[p] / w) | 0, this.world.tickCount, 0);
+    this.despawn(p);
+  }
+
+  /** Lets go of any rescue this pawn is doing: the victim stays where it is, unclaimed. */
+  private endRescue(p: number): void {
+    const v = this.rescueTarget[p];
+    if (v >= 0) {
+      if (this.rescuer[v] === p) this.rescuer[v] = -1;
+      if (this.carriedBy[v] === p) this.carriedBy[v] = -1;
+    }
+    this.rescueTarget[p] = -1;
+  }
+
+  /** The rescue is off (victim gone, dead, or taken): stand down, flying home if out in space. */
+  private abortRescue(p: number, tx: number, ty: number): void {
+    this.endRescue(p);
+    this.pathLen[p] = 0;
+    const onDeck = this.world.gas.cells[ty * this.world.width + tx] === OPEN;
+    this.state[p] = onDeck ? IDLE : RETURNING;
+    this.returnLeg[p] = 1;
+  }
+
+  /** True while victim `v` is still this pawn's to rescue. */
+  private holdsRescue(p: number, v: number): boolean {
+    return v >= 0 && this.alive[v] === 1 && this.rescuer[v] === p;
+  }
+
+  /**
+   * Looks for the nearest pawn that is down or stranded and that nobody is fetching. A victim
+   * on the deck is walked to; one out in space is flown to from the deck tile nearest them.
+   * Integer-only: it reads `needy` and `cellOf`, which the hot tick keeps current.
+   */
+  private tryRescue(p: number, tx: number, ty: number): boolean {
+    const w = this.world.width;
+    let best = -1;
+    let bestD = 0x7fffffff;
+    for (let v = 0; v < MAX_PAWNS; v++) {
+      if (v === p || this.alive[v] === 0 || this.needy[v] === 0 || this.rescuer[v] >= 0 || this.carriedBy[v] >= 0) continue;
+      const c = this.cellOf[v];
+      const vx = c % w;
+      const vy = (c / w) | 0;
+      const d = (vx > tx ? vx - tx : tx - vx) + (vy > ty ? vy - ty : ty - vy);
+      if (d < bestD) {
+        bestD = d;
+        best = v;
+      }
+    }
+    if (best < 0) return false;
+    const c = this.cellOf[best];
+    const onDeck = this.world.gas.cells[c] === OPEN && this.paths.cost[c] !== COST_IMPASSABLE;
+    const goal = onDeck ? c : this.launchTile(c);
+    if (goal < 0 || !this.planPath(p, tx, ty, goal % w, (goal / w) | 0, false)) return false;
+    this.rescuer[best] = p;
+    this.rescueTarget[p] = best;
+    this.rescueFly[p] = onDeck ? 0 : 1;
+    this.target[p * 2] = goal % w;
+    this.target[p * 2 + 1] = (goal / w) | 0;
+    this.state[p] = RESCUE_GO;
+    this.timer[p] = REPATH_TICKS;
+    return true;
+  }
+
+  /** Walking to the victim, or to the deck tile to fly out from. */
+  private tickRescueGo(p: number, tx: number, ty: number): void {
+    const v = this.rescueTarget[p];
+    if (!this.holdsRescue(p, v) || this.carriedBy[v] >= 0) {
+      this.abortRescue(p, tx, ty);
+      return;
+    }
+    const w = this.world.width;
+    const c = this.cellOf[v];
+    const vx = c % w;
+    const vy = (c / w) | 0;
+    if (this.reachable(tx, ty, vx, vy)) {
+      this.grab(p, v);
+      return;
+    }
+    if (this.pathStep[p] < this.pathLen[p]) return;
+    if (this.rescueFly[p] === 1) {
+      // At the deck edge: launch.
+      this.home[p] = ty * w + tx;
+      this.anchor[p] = c;
+      this.clamp[p] = 0;
+      this.state[p] = RESCUE_FLY;
+      return;
+    }
+    // The victim moved: go again.
+    if (!this.planPath(p, tx, ty, vx, vy, false)) this.abortRescue(p, tx, ty);
+  }
+
+  /** Flying out to the victim; thrusters aim at them every tick. */
+  private tickRescueFly(p: number): void {
+    const v = this.rescueTarget[p];
+    const w = this.world.width;
+    const here = this.cellOf[p];
+    if (!this.holdsRescue(p, v) || this.carriedBy[v] >= 0) {
+      this.abortRescue(p, here % w, (here / w) | 0);
+      return;
+    }
+    const c = this.cellOf[v];
+    this.anchor[p] = c;
+    if (this.reachable(here % w, (here / w) | 0, c % w, (c / w) | 0)) this.grab(p, v);
+  }
+
+  /** Within arm's reach: the same tile or a neighbour. */
+  private reachable(x: number, y: number, vx: number, vy: number): boolean {
+    return (x > vx ? x - vx : vx - x) <= 1 && (y > vy ? y - vy : vy - y) <= 1;
+  }
+
+  private grab(p: number, v: number): void {
+    this.carriedBy[v] = p;
+    this.needy[v] = 0;
+    this.state[p] = RESCUE_CARRY;
+    this.carryPlanned[p] = 0;
+    this.pathLen[p] = 0;
+    this.pathStep[p] = 0;
+    this.anchor[p] = this.home[p];
+  }
+
+  /**
+   * Carrying: out in space, thrusters take both home to the deck edge; aboard, walk to the
+   * nearest breathable deck (or stay put if there is none in reach) and set the victim down.
+   */
+  private tickRescueCarry(p: number, tx: number, ty: number): void {
+    const v = this.rescueTarget[p];
+    if (!this.holdsRescue(p, v)) {
+      this.abortRescue(p, tx, ty);
+      return;
+    }
+    const w = this.world.width;
+    if (this.world.gas.cells[ty * w + tx] !== OPEN) {
+      this.anchor[p] = this.home[p] >= 0 ? this.home[p] : this.nearestFloor(tx, ty, ANCHOR_SEARCH_RADIUS);
+      return;
+    }
+    this.anchor[p] = -1;
+    if (this.carryPlanned[p] === 0) {
+      this.carryPlanned[p] = 1;
+      const safe = this.safeTile(tx, ty);
+      if (safe >= 0 && safe !== ty * w + tx && this.planPath(p, tx, ty, safe % w, (safe / w) | 0, false)) return;
+      this.pathLen[p] = 0;
+    }
+    if (this.pathStep[p] >= this.pathLen[p]) this.setDown(p, v);
+  }
+
+  /** Puts the victim down beside the rescuer and ends the rescue. */
+  private setDown(p: number, v: number): void {
+    const w = this.world.width;
+    this.carriedBy[v] = -1;
+    this.rescuer[v] = -1;
+    this.strandedTicks[v] = 0;
+    this.needy[v] = 0;
+    this.rescueWait[v] = this.paths.breathable[this.cellOf[p]] === 1 ? 0 : RESCUE_RETRY_TICKS;
+    this.pos[v * 2] = this.pos[p * 2];
+    this.pos[v * 2 + 1] = this.pos[p * 2 + 1];
+    this.vel[v * 2] = 0;
+    this.vel[v * 2 + 1] = 0;
+    this.anchor[v] = -1;
+    if (this.state[v] !== DOWN) this.state[v] = IDLE;
+    this.rescueTarget[p] = -1;
+    this.state[p] = IDLE;
+    this.pathLen[p] = 0;
+    this.hazards.log(H_RESCUED, v, this.cellOf[p] % w, (this.cellOf[p] / w) | 0, this.world.tickCount, 0);
+  }
+
+  /**
+   * Nearest breathable deck tile walkable from (x, y), by breadth-first search over passable
+   * tiles (at most `SAFE_SEARCH_TILES`), or the start tile if none is found.
+   */
+  private safeTile(x: number, y: number): number {
+    const w = this.world.width;
+    const h = this.world.height;
+    const cost = this.paths.cost;
+    const air = this.paths.breathable;
+    const queue = this.bfsQueue;
+    const seen = this.bfsSeen;
+    const stamp = ++this.bfsStamp;
+    const start = y * w + x;
+    let head = 0;
+    let tail = 0;
+    queue[tail++] = start;
+    seen[start] = stamp;
+    while (head < tail) {
+      const i = queue[head++];
+      if (air[i] === 1) return i;
+      const cx = i % w;
+      const cy = (i / w) | 0;
+      for (let d = 0; d < 4; d++) {
+        const nx = d === 0 ? cx - 1 : d === 1 ? cx + 1 : cx;
+        const ny = d === 2 ? cy - 1 : d === 3 ? cy + 1 : cy;
+        if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+        const j = ny * w + nx;
+        if (seen[j] === stamp || cost[j] === COST_IMPASSABLE || tail >= queue.length) continue;
+        seen[j] = stamp;
+        queue[tail++] = j;
+      }
+    }
+    return start;
+  }
+
+  /** The walkable deck tile nearest cell `c` (out in space), searching rings out to `LAUNCH_SEARCH_RADIUS`, or -1. */
+  private launchTile(c: number): number {
+    const w = this.world.width;
+    const cx = c % w;
+    const cy = (c / w) | 0;
+    for (let r = 1; r <= LAUNCH_SEARCH_RADIUS; r++) {
+      let best = -1;
+      let bestD = 0x7fffffff;
+      for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          if (dx !== -r && dx !== r && dy !== -r && dy !== r) continue;
+          const x = cx + dx;
+          const y = cy + dy;
+          if (this.paths.getCost(x, y) === COST_IMPASSABLE) continue;
+          const d = dx * dx + dy * dy;
+          if (d < bestD) {
+            bestD = d;
+            best = y * w + x;
+          }
+        }
+      }
+      if (best >= 0) return best;
+    }
+    return -1;
   }
 
   /** True when an order's tile still has work left: a wall to open, or anything left to sever. */
@@ -797,8 +1236,68 @@ export class PawnManager {
     const hy = (home / w) | 0;
     const dx = tx > HAUL_LANE_X ? tx - HAUL_LANE_X : HAUL_LANE_X - tx;
     const dy = ty > hy ? ty - hy : hy - ty;
-    if (this.returnLeg[p] === 0 && dx <= 1 && dy <= 1) this.returnLeg[p] = 1;
-    this.anchor[p] = this.returnLeg[p] === 0 ? hy * w + HAUL_LANE_X : home;
+    if (this.returnLeg[p] === 0 && dx <= 1 && dy <= 1) {
+      // At the lane: aim for a deck tile near home that can be flown to in a straight line,
+      // since the tile left from may sit behind the hull's frame.
+      this.returnLeg[p] = 1;
+      this.home[p] = this.landingTile(ty * w + tx, home);
+    }
+    this.anchor[p] = this.returnLeg[p] === 0 ? hy * w + HAUL_LANE_X : this.home[p];
+  }
+
+  /** Radius around home searched for a deck tile in clear line of sight. */
+  private static readonly LANDING_RADIUS = 6;
+
+  /**
+   * The walkable deck tile nearest `home` (within `LANDING_RADIUS`) with a clear straight
+   * line from `from`: no wall on any cell the line crosses. Falls back to `home`. Integer-only.
+   */
+  private landingTile(from: number, home: number): number {
+    const w = this.world.width;
+    const hx = home % w;
+    const hy = (home / w) | 0;
+    const r = PawnManager.LANDING_RADIUS;
+    let best = home;
+    let bestD = 0x7fffffff;
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        const d = dx * dx + dy * dy;
+        if (d >= bestD) continue;
+        const x = hx + dx;
+        const y = hy + dy;
+        if (this.paths.getCost(x, y) === COST_IMPASSABLE) continue;
+        if (!this.clearLine(from % w, (from / w) | 0, x, y)) continue;
+        bestD = d;
+        best = y * w + x;
+      }
+    }
+    return best;
+  }
+
+  /** Bresenham walk from (x0, y0) to (x1, y1): true when no cell on it is a wall. */
+  private clearLine(x0: number, y0: number, x1: number, y1: number): boolean {
+    const cells = this.world.gas.cells;
+    const w = this.world.width;
+    const sx = x0 < x1 ? 1 : -1;
+    const sy = y0 < y1 ? 1 : -1;
+    const dx = x1 > x0 ? x1 - x0 : x0 - x1;
+    const dy = y1 > y0 ? y0 - y1 : y1 - y0;
+    let err = dx + dy;
+    let x = x0;
+    let y = y0;
+    for (;;) {
+      if (cells[y * w + x] === WALL) return false;
+      if (x === x1 && y === y1) return true;
+      const e2 = 2 * err;
+      if (e2 >= dy) {
+        err += dy;
+        x += sx;
+      }
+      if (e2 <= dx) {
+        err += dx;
+        y += sy;
+      }
+    }
   }
 
   private tickNavigating(p: number, tx: number, ty: number): void {
@@ -927,6 +1426,7 @@ export class PawnManager {
     this.hazards.log(kind, p, tx, ty, this.world.tickCount, this.scalars[S_IMPULSE]);
     this.dropOrder(p, FLEE_SUSPEND_TICKS);
     this.releaseHaul(p);
+    this.endRescue(p);
     this.state[p] = FLEEING;
     this.clamp[p] = 0;
     this.anchor[p] = -1;

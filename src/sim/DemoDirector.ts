@@ -2,7 +2,8 @@ import { HAUL_LANE_X } from './constants';
 import { B_X, B_Y, BODY_STRIDE, MAX_BODIES } from './DebrisField';
 import { MATERIAL_VALUE, Material } from './materials';
 import { PawnState } from './PawnManager';
-import { DEMO, buildDemoHull, seedDemoCrew, setRoomPressure } from './scenes';
+import { HazardKind } from './HazardLog';
+import { DEMO, buildDemoHull, seedDemoCrew, setRoomPressure, strandedCrewman } from './scenes';
 import { type ShipBlueprint, buildShip, seedShipCrew } from './ships';
 import type { Simulation } from './Simulation';
 import { ToolKind } from './WorkOrderQueue';
@@ -53,7 +54,9 @@ export interface DemoSection {
  *   4. tearoff   The gantry arms are cut; the hull tears away with the crew aboard.
  *   5. haul      On a fresh, vented hull the crew gets a salvage order on the engine block and
  *                does the rest alone: severs it free, tows it to the barge, flies home.
- *   6. contract  The next ship from the generated fleet docks, with its contract on the banner.
+ *   6. rescue    A crewman blown out of the open stern drifts away unconscious; a rescuer
+ *                walks to the edge, flies out on suit thrusters and brings them back aboard.
+ *   7. contract  The next ship from the generated fleet docks, with its contract on the banner.
  *
  * `restart()` plays them all in order and loops. `playSection(i)` loops one section on its
  * own: each section's `setup` builds what it needs from scratch (the deck section starts
@@ -169,6 +172,19 @@ export class DemoDirector {
         beats: [
           this.untilDebris('Salvage order on the engine block: the crew severs it free, no player input', 20 * 120),
           this.untilHauled('A hauler climbs aboard, tugs it to the barge and flies home', 13 * MATERIAL_VALUE[Material.ENGINE_PART], 20 * 90),
+        ],
+      },
+      {
+        id: 'rescue',
+        title: 'Rescue',
+        continues: false,
+        setup: () => {
+          this.cursorX = this.cursorY = -1;
+          strandedCrewman(this.sim);
+        },
+        beats: [
+          this.untilState('A crewman drifts out of the stern unconscious; a rescuer heads for the edge', PawnState.RESCUE_FLY, 20 * 40),
+          this.untilRescued('The rescuer flies out on suit thrusters, grabs them and brings them back aboard', 20 * 90),
         ],
       },
       {
@@ -331,6 +347,44 @@ export class DemoDirector {
         this.cursorX = this.cursorY = -1;
       },
       tick: () => this.sim.world.debris.count > 0 || ++t >= timeout,
+    };
+  }
+
+  /** Waits, hands off, until some pawn is in `state` (or `timeout` ticks pass). */
+  private untilState(label: string, state: number, timeout: number): Beat {
+    let t = 0;
+    const pawns = this.sim.pawns;
+    return {
+      label,
+      start: () => {
+        t = 0;
+      },
+      tick: () => {
+        if (++t >= timeout) return true;
+        for (let p = 0; p < pawns.capacity; p++) if (pawns.alive[p] === 1 && pawns.state[p] === state) return true;
+        return false;
+      },
+    };
+  }
+
+  /** Waits, hands off, until someone has been rescued and no rescuer is still out flying. */
+  private untilRescued(label: string, timeout: number): Beat {
+    let t = 0;
+    const sim = this.sim;
+    return {
+      label,
+      start: () => {
+        t = 0;
+      },
+      tick: () => {
+        if (++t >= timeout) return true;
+        if (sim.hazards.countOf(HazardKind.RESCUED) === 0) return false;
+        for (let p = 0; p < sim.pawns.capacity; p++) {
+          const st = sim.pawns.state[p];
+          if (sim.pawns.alive[p] === 1 && (st === PawnState.RESCUE_FLY || st === PawnState.RESCUE_CARRY)) return false;
+        }
+        return true;
+      },
     };
   }
 

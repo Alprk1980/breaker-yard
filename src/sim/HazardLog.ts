@@ -15,6 +15,12 @@ export const HazardKind = {
   CARRIED_OFF: 6,
   /** A tow made no headway, so the hauler let go and headed home. */
   HAUL_ABANDONED: 7,
+  /** Health ran out: suffocation, an impact or burns. The pawn is down until it recovers. */
+  KNOCKED_OUT: 8,
+  /** Kept losing health while down. */
+  DIED: 9,
+  /** A rescuer brought a downed or stranded pawn to safety. */
+  RESCUED: 10,
 } as const;
 
 export const HAZARD_NAMES: readonly string[] = [
@@ -26,6 +32,9 @@ export const HAZARD_NAMES: readonly string[] = [
   'unreachable',
   'carried off on debris',
   'haul abandoned: stuck',
+  'knocked out',
+  'died',
+  'rescued',
 ];
 
 /**
