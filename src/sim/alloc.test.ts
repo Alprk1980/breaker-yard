@@ -144,8 +144,11 @@ describe('tick loop allocations', () => {
       for (let t = 0; t < TICKS; t++) sim.tick();
       return 0;
     };
-    scenario(new Simulation(), false);
-    scenario(new Simulation(), false);
+    // Four warm-up runs, not two: the knockouts, deaths and rescues happen only about ten
+    // times a run, so V8 needs a few runs to optimise that code. Measured across repeats,
+    // runs 1 and 2 still allocate ~10 KB while it tiers up; from run 3 on the whole run
+    // allocates ~350 B beyond the measurement itself (0.2 B/tick).
+    for (let r = 0; r < 4; r++) scenario(new Simulation(), false);
     const sim = new Simulation();
     const bytes = scenario(sim, true);
     console.log(`new-space bytes over ${TICKS} sim ticks: fire=${bytes}`);

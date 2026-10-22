@@ -64,8 +64,17 @@ export class StressLattice {
   converged = false;
   /** Iterations spent in the most recent `relax()` call. */
   lastIterations = 0;
-  /** Largest relative change seen in the last sweep. */
-  lastResidual = 0;
+  /**
+   * Largest relative change seen in the last sweep. In a typed array behind an accessor, not
+   * a plain field: a field that starts as integer 0 and later holds fractions changes its
+   * representation, which changes the object's shape and throws away optimised code built
+   * against the old one.
+   */
+  private readonly residualSlot = new Float64Array(1);
+
+  get lastResidual(): number {
+    return this.residualSlot[0];
+  }
   /** Edges snapped during the most recent `step()`. */
   snappedLastStep = 0;
   totalSnapped = 0;
@@ -345,7 +354,7 @@ export class StressLattice {
       if (residual < tol) this.converged = true;
     }
     this.lastIterations = it;
-    this.lastResidual = residual;
+    this.residualSlot[0] = residual;
     return it;
   }
 

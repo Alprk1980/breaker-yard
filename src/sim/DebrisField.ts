@@ -1,5 +1,5 @@
 import { CELL_COUNT, HEIGHT, TICK_DT, WIDTH } from './constants';
-import { GasCell, type Vec2 } from './GasGrid';
+import { GasCell, type Vec2, newVec2 } from './GasGrid';
 import { MATERIAL_BIN, MATERIAL_MASS, MATERIAL_VALUE } from './materials';
 import { MISSORT_FACTOR } from './materialSchema';
 import type { Salvage } from './Salvage';
@@ -138,8 +138,17 @@ export class DebrisField {
   readonly liftedList = new Int32Array(CELL_COUNT);
   liftedCount = 0;
 
-  /** Gas carried off in bodies, ever. `totalMass + vacuumAbsorbed + gasCarried` is conserved. */
-  gasCarried = 0;
+  /**
+   * Gas carried off in bodies, ever: `totalMass + vacuumAbsorbed + gasCarried` is conserved.
+   * In a typed array behind an accessor, not a plain field: a field that starts as integer 0
+   * and later holds fractions changes its representation, which changes the object's shape
+   * and throws away optimised code built against the old one.
+   */
+  private readonly carried = new Float64Array(1);
+
+  get gasCarried(): number {
+    return this.carried[0];
+  }
   detachedTotal = 0;
   contactsLastStep = 0;
   contactsTotal = 0;
@@ -157,13 +166,13 @@ export class DebrisField {
   private readonly queue = new Int32Array(CELL_COUNT);
   private readonly scratch = new Float64Array(SCRATCH_SIZE);
   private readonly acc = new Float64Array(ACC_SIZE);
-  private readonly impulse: Vec2 = { x: 0, y: 0 };
+  private readonly impulse: Vec2 = newVec2();
 
   clear(): void {
     this.alive.fill(0);
     this.count = 0;
     this.tilesUsed = 0;
-    this.gasCarried = 0;
+    this.carried[0] = 0;
     this.detachedTotal = 0;
     this.grabBody = -1;
     this.clearLifted();
@@ -336,7 +345,7 @@ export class DebrisField {
     s[o + B_MASS] = mass;
     s[o + B_RADIUS] = acc[A_RADIUS] + Math.SQRT1_2;
     this.bodyGas[b] = acc[A_GAS];
-    this.gasCarried += acc[A_GAS];
+    this.carried[0] += acc[A_GAS];
   }
 
   /** One fixed tick: grapple, integrate, collide, deliver. Allocation-free. */
