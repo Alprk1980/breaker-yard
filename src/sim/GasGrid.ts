@@ -105,6 +105,8 @@ export class GasGrid {
   toxinVented = 0;
 
   private readonly scratch: Vec2 = { x: 0, y: 0 };
+  /** Result slot for `measurePressureDelta`: a double returned from a call that V8 does not inline gets boxed. */
+  private readonly delta = new Float64Array(1);
 
   constructor(width = WIDTH, height = HEIGHT, diffusion = 0.24, substeps = 8) {
     this.width = width;
@@ -444,7 +446,24 @@ export class GasGrid {
    * two gas-bearing samples. Never allocates.
    */
   getPressureDelta(x: number, y: number): number {
-    if (!this.inBounds(x, y)) return 0;
+    this.measurePressureDelta(x, y);
+    return this.delta[0];
+  }
+
+  /**
+   * `getPressureDelta(x, y) > limitBar`, for per-tick safety checks. Returning a boolean
+   * instead of a double keeps the check allocation-free even when V8 does not inline it,
+   * and so does reading the delta through `delta` rather than a double return value.
+   */
+  exceedsPressureDelta(x: number, y: number, limitBar: number): boolean {
+    this.measurePressureDelta(x, y);
+    return this.delta[0] > limitBar;
+  }
+
+  /** Writes `getPressureDelta(x, y)` to `delta[0]`. */
+  private measurePressureDelta(x: number, y: number): void {
+    this.delta[0] = 0;
+    if (!this.inBounds(x, y)) return;
     const self = this.cells[y * this.width + x];
     let lo = Infinity;
     let hi = -Infinity;
@@ -467,15 +486,7 @@ export class GasGrid {
       if (p > hi) hi = p;
       samples++;
     }
-    return samples < 2 ? 0 : hi - lo;
-  }
-
-  /**
-   * `getPressureDelta(x, y) > limitBar`, for per-tick safety checks. Returning a boolean
-   * instead of a double keeps the check allocation-free even when V8 does not inline it.
-   */
-  exceedsPressureDelta(x: number, y: number, limitBar: number): boolean {
-    return this.getPressureDelta(x, y) > limitBar;
+    this.delta[0] = samples < 2 ? 0 : hi - lo;
   }
 
   /**

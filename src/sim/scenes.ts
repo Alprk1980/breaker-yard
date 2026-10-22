@@ -1,3 +1,5 @@
+import { B_X, B_Y, BODY_STRIDE } from './DebrisField';
+import { Bin, Material } from './materials';
 import type { Simulation } from './Simulation';
 import { TileFlags } from './TileFlags';
 import { ToolKind } from './WorkOrderQueue';
@@ -16,6 +18,17 @@ export const DEMO = {
   armRows: [54, 74],
   /** Engine block on the right frame: heavy nodes that make the hull a cantilever. */
   engine: { x: 84, y0: 58, y1: 70, mass: 6 },
+  /** Control consoles along the top wall: solid electronics tiles. */
+  consoles: { y: 51, x0: 70, x1: 75 },
+  /**
+   * Salvage bins out in open space, right of the hull. Each is smaller than the hull, so
+   * the ship has to be cut into pieces before anything fits.
+   */
+  zones: [
+    { bin: Bin.FURNACE, x0: 92, y0: 10, x1: 124, y1: 40 },
+    { bin: Bin.PROCESSOR, x0: 92, y0: 49, x1: 124, y1: 79 },
+    { bin: Bin.BARGE, x0: 92, y0: 88, x1: 124, y1: 118 },
+  ],
   roomPressure: 1.0,
   /** Member capacity. The intact hull peaks around 0.7 utilisation; losing an arm overloads the other. */
   breakThreshold: 180,
@@ -64,8 +77,10 @@ export function buildDemoHull(world: World): void {
   world.lattice.setAnchor(gx, gy1, true);
   world.lattice.setAnchor(gx - 1, gy1, true);
 
-  const { engine } = DEMO;
-  for (let y = engine.y0; y <= engine.y1; y++) world.lattice.setMass(engine.x, y, engine.mass);
+  const { engine, consoles } = DEMO;
+  for (let y = engine.y0; y <= engine.y1; y++) world.setTile(engine.x, y, FRAME, engine.mass, Material.ENGINE_PART);
+  for (let x = consoles.x0; x <= consoles.x1; x++) world.setTile(x, consoles.y, BULKHEAD, 1, Material.ELECTRONICS);
+  for (const z of DEMO.zones) world.salvage.addZone(z.bin, z.x0, z.y0, z.x1, z.y1);
 
   setRoomPressure(world, DEMO.roomPressure);
   world.lattice.solve();
@@ -80,9 +95,10 @@ export function setRoomPressure(world: World, bar: number): void {
 }
 
 /**
- * Runs every tick-loop branch (sealed, venting, leaking, snapping, floating) on a throwaway
- * world so V8 optimises the kernels before the real scene starts. Without this, the
- * first breach or snap runs briefly in unoptimised code, which boxes doubles.
+ * Runs every tick-loop branch (sealed, venting, leaking, snapping, tearing free, debris
+ * towed into the gantry and colliding) on a throwaway world so V8 optimises the kernels
+ * before the real scene starts. Without this, the first breach or snap runs briefly in
+ * unoptimised code, which boxes doubles.
  */
 export function warmUpKernels(world: World, ticksPerPhase = 300): void {
   buildDemoHull(world);
@@ -93,7 +109,32 @@ export function warmUpKernels(world: World, ticksPerPhase = 300): void {
   for (let t = 0; t < ticksPerPhase; t++) world.tick();
   world.cutTile(DEMO.gantry.x + 3, DEMO.armRows[0]);
   for (let t = 0; t < ticksPerPhase; t++) world.tick();
+  towIntoGantry(world, ticksPerPhase);
   world.clear();
+}
+
+/**
+ * Hooks the grapple onto the biggest piece of debris (the torn-off hull) at its centre
+ * and aims it through the gantry. Returns false when there is no debris.
+ */
+export function grappleHull(world: World): boolean {
+  const debris = world.debris;
+  let best = -1;
+  for (let b = 0; b < debris.alive.length; b++) {
+    if (debris.alive[b] === 1 && (best < 0 || debris.tileCount[b] > debris.tileCount[best])) best = b;
+  }
+  if (best < 0) return false;
+  const o = best * BODY_STRIDE;
+  debris.grabAt(best, debris.body[o + B_X], debris.body[o + B_Y]);
+  debris.setGrappleTarget(DEMO.gantry.x - 12, 70);
+  return true;
+}
+
+/** Hauls the torn-off hull into the gantry so it hits and grinds along it. Used by warm-up and tests. */
+export function towIntoGantry(world: World, ticks: number): void {
+  if (!grappleHull(world)) return;
+  for (let t = 0; t < ticks; t++) world.tick();
+  world.debris.releaseGrapple();
 }
 
 /** Spawns the demo crew inside the main room. */
@@ -103,8 +144,8 @@ export function seedDemoCrew(sim: Simulation): void {
 
 /**
  * Like `warmUpKernels`, for the crew: a full 32-pawn crew runs through navigating,
- * cutting, refused high-pressure cuts, a breach, drag and fleeing on a throwaway
- * simulation, several times over, then it is cleared. Pawn code paths are individually
+ * cutting, refused high-pressure cuts, a breach, drag, fleeing and riding a torn-off
+ * hull on a throwaway simulation, several times over, then it is cleared. Pawn code paths are individually
  * cold (one pawn flees now and then), so V8 only optimises them with a big crew; until
  * then they run in the interpreter, which boxes every double.
  */
@@ -132,6 +173,11 @@ export function warmUpCrew(sim: Simulation, cycles = 3, ticksPerPhase = 300): vo
       pawns.pos[p * 2] = x1 + 2.5;
       pawns.pos[p * 2 + 1] = 60.5 + p * 2;
     }
+    for (let t = 0; t < ticksPerPhase; t++) sim.tick();
+    // Tear the hull off with the crew aboard and tow it.
+    world.cutTile(DEMO.gantry.x + 3, DEMO.armRows[0]);
+    for (let t = 0; t < 30; t++) sim.tick();
+    grappleHull(world);
     for (let t = 0; t < ticksPerPhase; t++) sim.tick();
   }
   world.clear();

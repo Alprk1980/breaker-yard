@@ -1,7 +1,7 @@
 import { getHeapSpaceStatistics } from 'node:v8';
 import { describe, expect, it } from 'vitest';
 import { HazardKind } from './HazardLog';
-import { DEMO, buildDemoHull, seedDemoCrew, setRoomPressure, warmUpCrew, warmUpKernels } from './scenes';
+import { DEMO, buildDemoHull, grappleHull, seedDemoCrew, setRoomPressure, warmUpCrew, warmUpKernels } from './scenes';
 import { Simulation } from './Simulation';
 import { TileFlags } from './TileFlags';
 import { ToolKind } from './WorkOrderQueue';
@@ -27,13 +27,21 @@ const TICKS = 2000;
 // allocated every tick shows up as >= 16 B/tick. A few KB of one-off cost (the measurement
 // itself is ~2.5 KB with an empty loop) stays well under 4 B/tick over 2000 ticks.
 const MAX_BYTES_PER_TICK = 4;
+/**
+ * One-off allowance per tile lifted on the tick a structure tears free. Building a body is
+ * an event, not per-tick work, and it runs too rarely to stay optimised: V8 drops the
+ * optimised per-tile code once the warm-up world is collected, so the first real tear
+ * runs interpreted (~640 B per tile, one scavenge for the whole hull). The ticks after it
+ * are held to the per-tick limit by the drifting and towing phases.
+ */
+const TEAR_OFF_BYTES_PER_TILE = 1024;
 
 describe('tick loop allocations', () => {
   it('runs with --expose-gc so the heap starts clean', () => {
     expect(typeof gc).toBe('function');
   });
 
-  it('allocates nothing per tick in steady state, while venting, snapping, and venting toxin', { timeout: 90_000 }, () => {
+  it('allocates nothing per tick sealed, venting, venting toxin, tearing free, drifting and towing', { timeout: 90_000 }, () => {
     warmUpKernels(new World());
     const world = new World();
     buildDemoHull(world);
@@ -45,11 +53,6 @@ describe('tick loop allocations', () => {
     world.cutTile(DEMO.hull.x1, 64);
     const venting = bytesAllocatedDuring(world, TICKS);
 
-    // Cutting an arm forces snaps, topology rebuilds and flood fills inside tick().
-    world.cutTile(DEMO.gantry.x + 3, DEMO.armRows[0]);
-    const snapping = bytesAllocatedDuring(world, TICKS);
-    expect(world.lattice.totalSnapped).toBeGreaterThan(0);
-
     // A second, wider breach with a toxic leak feeding the room: the flow pass carries the
     // toxin out through both holes.
     for (let y = 70; y < 74; y++) world.cutTile(DEMO.hull.x1, y);
@@ -57,13 +60,33 @@ describe('tick loop allocations', () => {
     const toxic = bytesAllocatedDuring(world, TICKS);
     expect(world.gas.toxinVented).toBeGreaterThan(0);
 
+    // On a fresh hull, cutting an arm forces snaps, topology rebuilds and flood fills inside
+    // tick(), and the hull tears free into debris.
+    buildDemoHull(world);
+    for (let t = 0; t < 500; t++) world.tick();
+    world.cutTile(DEMO.gantry.x + 3, DEMO.armRows[0]);
+    const tearing = bytesAllocatedDuring(world, TICKS);
+    expect(world.lattice.totalSnapped).toBeGreaterThan(0);
+    expect(world.debris.count).toBeGreaterThan(0);
+    const lifted = world.debris.tilesUsed;
+
+    const drifting = bytesAllocatedDuring(world, TICKS);
+    // Grapple the wreck into the gantry: contacts, impulses and position corrections.
+    expect(grappleHull(world)).toBe(true);
+    const contacts = world.debris.contactsTotal;
+    const towing = bytesAllocatedDuring(world, TICKS);
+    expect(world.debris.contactsTotal).toBeGreaterThan(contacts);
+
     console.log(
-      `new-space bytes over ${TICKS} ticks: steady=${steady} venting=${venting} snapping=${snapping} toxic=${toxic}`,
+      `new-space bytes over ${TICKS} ticks: steady=${steady} venting=${venting} toxic=${toxic} ` +
+        `tearing=${tearing} drifting=${drifting} towing=${towing}`,
     );
     expect(steady / TICKS).toBeLessThan(MAX_BYTES_PER_TICK);
     expect(venting / TICKS).toBeLessThan(MAX_BYTES_PER_TICK);
-    expect(snapping / TICKS).toBeLessThan(MAX_BYTES_PER_TICK);
     expect(toxic / TICKS).toBeLessThan(MAX_BYTES_PER_TICK);
+    expect((tearing - lifted * TEAR_OFF_BYTES_PER_TILE) / TICKS).toBeLessThan(MAX_BYTES_PER_TICK);
+    expect(drifting / TICKS).toBeLessThan(MAX_BYTES_PER_TICK);
+    expect(towing / TICKS).toBeLessThan(MAX_BYTES_PER_TICK);
   });
 
   it('allocates nothing per tick with pawns pathing, cutting, refusing and fleeing', { timeout: 300_000 }, () => {

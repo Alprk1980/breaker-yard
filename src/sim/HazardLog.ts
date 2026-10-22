@@ -11,6 +11,8 @@ export const HazardKind = {
   ADRIFT: 4,
   /** No route to the order's tile. */
   UNREACHABLE: 5,
+  /** The deck tore free of the anchors with the pawn aboard. */
+  CARRIED_OFF: 6,
 } as const;
 
 export const HAZARD_NAMES: readonly string[] = [
@@ -20,6 +22,7 @@ export const HAZARD_NAMES: readonly string[] = [
   'decompression',
   'adrift',
   'unreachable',
+  'carried off on debris',
 ];
 
 /**

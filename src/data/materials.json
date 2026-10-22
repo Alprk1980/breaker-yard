@@ -1,0 +1,47 @@
+[
+  {
+    "id": "deck-plate",
+    "name": "Ferrous Deck Plate",
+    "description": "Scuffed walkway plating, rolled thin and welded down in long strips.",
+    "value": 4,
+    "mass": 0.5,
+    "bin": "furnace",
+    "color": "#8892a6"
+  },
+  {
+    "id": "hull-plate",
+    "name": "Bulkhead Hull Plate",
+    "description": "Interior bulkheads that seal the decks and take a lot of punishment.",
+    "value": 6,
+    "mass": 0.8,
+    "bin": "processor",
+    "color": "#9a7b55"
+  },
+  {
+    "id": "girder-alloy",
+    "name": "Load-Bearing Girder",
+    "description": "Heavy frame girders that carry the ship's structure under stress.",
+    "value": 10,
+    "mass": 1,
+    "bin": "processor",
+    "color": "#b8863b"
+  },
+  {
+    "id": "engine-part",
+    "name": "Engine Block Core",
+    "description": "Dense engine block sections bolted through the main girders.",
+    "value": 100,
+    "mass": 6,
+    "bin": "barge",
+    "color": "#d24f4f"
+  },
+  {
+    "id": "electronics",
+    "name": "Control Electronics",
+    "description": "Console and control equipment that may still hold useful parts.",
+    "value": 80,
+    "mass": 0.7,
+    "bin": "barge",
+    "color": "#56c2a4"
+  }
+]
