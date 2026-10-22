@@ -64,6 +64,11 @@ export const DRAG_GAIN = 12;
 export const MAGBOOT_GRIP = 6;
 /** Velocity damping while booted to a floor, per second. */
 export const BOOT_FRICTION = 8;
+/**
+ * Speed cap per axis, tiles/s. Keeps a pawn caught in a hard blowout under one tile per
+ * tick, so `move` (which only tests the destination tile) cannot tunnel through a wall.
+ */
+export const MAX_DRIFT_SPEED = 15;
 /** Suit thrusters used to reach a floor anchor when adrift, tiles/s^2. */
 export const THRUSTER_ACCEL = 4;
 export const REFUGE_RADIUS = 10;
@@ -269,8 +274,12 @@ export class PawnManager {
     const ay = imp.y * DRAG_GAIN * slip + ady * thrust;
     // A pawn clamped to its anchor sits at the tile centre and holds still whatever the stream does.
     const clamped = this.clamp[p] === 1;
-    const vx = clamped ? 0 : vel[p * 2] * damp + ax * dt;
-    const vy = clamped ? 0 : vel[p * 2 + 1] * damp + ay * dt;
+    const rawVx = vel[p * 2] * damp + ax * dt;
+    const rawVy = vel[p * 2 + 1] * damp + ay * dt;
+    const capVx = rawVx > MAX_DRIFT_SPEED ? MAX_DRIFT_SPEED : rawVx < -MAX_DRIFT_SPEED ? -MAX_DRIFT_SPEED : rawVx;
+    const capVy = rawVy > MAX_DRIFT_SPEED ? MAX_DRIFT_SPEED : rawVy < -MAX_DRIFT_SPEED ? -MAX_DRIFT_SPEED : rawVy;
+    const vx = clamped ? 0 : capVx;
+    const vy = clamped ? 0 : capVy;
     vel[p * 2] = vx;
     vel[p * 2 + 1] = vy;
     pos[p * 2] = clamped ? tx + 0.5 : pos[p * 2];
